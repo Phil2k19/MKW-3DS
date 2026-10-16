@@ -79,7 +79,7 @@ COOK_STEPS=[
  ('menu models',['{py}','tools/cook_menu_models.py','--machines','--jobs','{jobs}'],[SD+'/models/menu-models.json']),
  ('menu movies',['{py}','tools/cook_menu_movies.py','--jobs','{jobs}'],[SD+'/models/menu-movies.json',SD+'/movies/title.wav']),
  ('menu audio',['{py}','tools/cook_menu_audio.py'],[SD+'/models/menu-audio.json']),
- ('race bottom screen',['{py}','tools/cook_race_map.py','--jobs','{jobs}'],['build/race-map/textures/race_bottom_ui.t3x']),
+ ('race bottom screen',['{py}','tools/cook_race_map.py','--jobs','{jobs}'],['build/race-map/textures/race_minimap_ui.t3x']),
  # The SD build's archives index the finished package, so they come last.
  ('menu archive',['{py}','tools/pack_menu_assets.py'],[SD+'/menu.pak']),
  ('race archive',['{py}','tools/pack_race_assets.py'],[SD+'/race.pak']),

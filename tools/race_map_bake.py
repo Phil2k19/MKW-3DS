@@ -45,17 +45,18 @@ def course_path(relative):
 
 
 class Part:
-    """One GMDL v3/v4 part as numpy arrays."""
+    """One GMDL v3..v6 part as numpy arrays (the v4 submesh fields; v5/v6
+    append menu reflection and sampler state, which the bake does not use)."""
 
     def __init__(self, path):
         b = path.read_bytes()
         magic, version, nv, ni, ns, nt = struct.unpack_from('<4s5I', b)
-        if magic != b'GMDL' or version not in (3, 4):
-            raise ValueError(f'Not a GMDL v3/v4 model: {path}')
-        record = 56 if version == 4 else 52
+        if magic != b'GMDL' or version not in (3, 4, 5, 6):
+            raise ValueError(f'Not a GMDL v3..v6 model: {path}')
+        record = {3: 44, 4: 56, 5: 92, 6: 96}[version]
         self.submeshes = []
         for i in range(ns):
-            raw = b[24 + i * record:24 + (i + 1) * record]
+            raw = b[24 + i * record:24 + (i + 1) * record][:SUBMESH.size]
             if version == 3:
                 raw += bytes(12)
             self.submeshes.append(SUBMESH.unpack(raw))
