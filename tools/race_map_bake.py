@@ -294,7 +294,7 @@ def rgba_const(constant):
 
 def shade(sub, textures, vc, uv0, uv1, lod0, lod1):
     """TEV stages of Renderer::drawNow's default material path; returns RGBA (N,4)."""
-    first, count, tex, flags, sec, constant, *_ = sub
+    first, count, tex, flags, sec, constant, u0, v0, u1, v1, anim, *_ = sub
     n = len(vc)
     white = np.ones((n, 4))
     t0 = textures[tex].sample(uv0[:, 0], uv0[:, 1], (flags >> 8) & 3, (flags >> 10) & 3, lod0) if tex >= 0 else white
@@ -305,7 +305,10 @@ def shade(sub, textures, vc, uv0, uv1, lod0, lod1):
     scale0 = SCALES[(flags >> 4) & 3]
     rgb = t0[:, :3] * vc[:, :3] * scale0
     alpha = t0[:, 3] * vc[:, 3]
-    water = bool(flags & (1 << 29)) and not (flags & 1)
+    # The sea's glow is projected from the race camera (extended equation 3,
+    # unit 0 in projection mode): the top-down bake has no such camera and
+    # keeps the flat water colour the map had before.
+    water = (bool(flags & (1 << 29)) or ((anim >> 16) & 255) == 3) and not (flags & 1)
     if water:
         rgb = np.broadcast_to(np.array([0x40, 0x5a, 0x88]) / 255.0, (n, 3)).copy()
     if bit25 and mode == 0:

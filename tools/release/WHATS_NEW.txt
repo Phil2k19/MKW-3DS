@@ -1,6 +1,11 @@
-Fixed: quick updates on Windows builds
-  (game files were wrongly refused)
-Fixed: crash when closing the game
-Fixed: race-start sound on OK, and no
-  hop/drift sounds after finishing
-  (DarthMDev)
+ThePhilosophicalOne fork (in progress)
+Time Trial ghosts, Watch the Replay
+Look behind on X or ZL
+Course intros with fades, title card
+Retail menu and race sounds, voices
+Retail driver animations and poses
+CPU AI: vehicles, drifts, sparks
+Item warnings, Goombas, triples
+Retail minimap on the lower screen
+Sharper course textures, sea shine
+Faster, more responsive menus

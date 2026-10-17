@@ -178,6 +178,9 @@ void RaceItems::updateScattered(ItemActor& a,ItemWorldQuery query){
         // Box or Bob-omb), floor under the object lands it (fn_1_291F98 0x807A234C) unless an
         // object bounced it since the last step, and fn_1_2A655C (0x807B6910) stops it dead.
         const bool tracked=trapItem(a.kind)||ground;
+        // fn_1_2A655C, called here at 0x807A778C, plays the object's land sound (ObjProperties +0x68)
+        // as it comes to rest; its rest state (0x807B6BFC) plays nothing.
+        if(tracked&&!bounced&&!a.rested){a.rested=true;sound(ItemSoundCue::Land,a);}
         if(tracked&&!bounced){a.velocity={};a.settled=true;}
         else{a.velocity=tangent(a.velocity,n);a.settled=!tracked;}
     }else a.velocity.y=std::max(-100.f,a.velocity.y-2.2f);
@@ -320,16 +323,19 @@ void RaceItems::updateActor(ItemActor& a,ItemWorldQuery query){
                         a.flightDirection=normalized(a.flightDirection-normal*dot(a.flightDirection,normal),a.flightDirection);
                         a.velocity=a.flightDirection*a.travelSpeed-normal*2.5f;
                     }else if(trapItem(a.kind)){
-                        // fn_1_294794: a Bob-omb thuds on every floor hit.
-                        if(a.kind==ItemKind::Bobomb&&!a.settled)sound(ItemSoundCue::Bounce,a);
+                        // fn_1_294794 (0x807A4BB8): a Bob-omb thuds on a bounce (+0x74 bit 0x10 from
+                        // fn_1_2A71BC 0x807B7570); its landing plays the land sound below, never both.
+                        if(a.kind==ItemKind::Bobomb&&a.floorBounces)sound(ItemSoundCue::Bounce,a);
                         if(a.floorBounces){
                             --a.floorBounces;const Vec3 component=normal*into;
                             const float restitution=a.kind==ItemKind::Banana?0:a.kind==ItemKind::Bobomb?(a.backwards?a.bounceImpulse:.45f):a.backwards?0:.45f;
                             a.velocity=(a.velocity-component)*.55f-component*restitution;
                             if(a.kind==ItemKind::Bobomb&&a.backwards)a.bounceImpulse*=.8f;
                         }else{
-                            // ObjThrowable::OnFinishThrow (807a8078): the object's land sound once.
-                            if(!a.settled)sound(ItemSoundCue::Land,a);
+                            // ObjThrowable::OnFinishThrow (807a8078) = PAL fn_1_2A655C 0x807B6910, from the
+                            // Banana (0x807A3F0C), Fake Item Box (0x807A7A44) and Bob-omb (0x807A4BF4) states:
+                            // the land sound once; the rest state it enters (0x807B6BFC) plays nothing.
+                            if(!a.rested){a.rested=true;sound(ItemSoundCue::Land,a);}
                             a.velocity={};a.settled=true;
                         }
                     }else if(into<0)a.velocity=a.velocity-normal*into;

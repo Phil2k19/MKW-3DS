@@ -237,6 +237,10 @@ bool Renderer::init(){
     tintLoc_=shaderInstanceGetUniformLocation(program_.vertexShader,"tint");
     uv1RowLoc_[0]=shaderInstanceGetUniformLocation(program_.vertexShader,"uv1Row0");
     uv1RowLoc_[1]=shaderInstanceGetUniformLocation(program_.vertexShader,"uv1Row1");
+    static const char* projRows[]={"projRow0","projRow1","projRow2"};
+    for(int i=0;i<3;++i)projRowLoc_[i]=shaderInstanceGetUniformLocation(program_.vertexShader,projRows[i]);
+    projectedUv0Loc_=shaderInstanceGetUniformLocation(program_.vertexShader,"projectedUv0");
+    if(projRowLoc_[0]<0||projRowLoc_[1]<0||projRowLoc_[2]<0||projectedUv0Loc_<0)return fail();
     if(projectionLoc_<0||modelViewLoc_<0||lightLoc_<0||uvScrollLoc_<0||envRowLoc_[0]<0||envRowLoc_[1]<0||envRowLoc_[2]<0||envParamLoc_<0||
        uv1RowLoc_[0]<0||uv1RowLoc_[1]<0)return fail();
     if(uvRowLoc_[0]<0||uvRowLoc_[1]<0||uvRowLoc_[2]<0||uvRowLoc_[3]<0||tintLoc_<0)return fail();
@@ -620,6 +624,23 @@ static void setSampler(C3D_Tex* texture,uint32_t unit){
     C3D_TexSetFilterMipmap(texture,filter==3||filter==4?GPU_NEAREST:GPU_LINEAR);
     C3D_TexSetLodBias(texture,filter?bias:0.f);
 }
+// Submesh::sampler bit 3: unit 0 is a GX projection-mapped texgen.
+constexpr uint32_t SamplerProjected=1u<<3;
+// Its (s*q, t*q, q) rows on the eye position. GX maps the camera's screen to
+// s=0.5+0.5x, t=0.5-0.5y (t down; nw4r projection texture matrix), applies the
+// texture SRT uv (s'=uv0*s+uv1*t+uv2, t'=uv3*s+uv4*t+uv5) and divides by q per
+// pixel; PICA's t runs up (1-t'). The tilted projections hold screen x in row 1
+// and screen y in row 0 (mirror mode negates row 1, and the glow with it).
+static void projectedRows(const C3D_Mtx& projection,float horizontalSign,const float uv[6],C3D_FVec rows[3]){
+    static const float verticalSign=[]{C3D_Mtx t;Mtx_PerspTilt(&t,C3D_AngleFromDegrees(90.f),1.f,1.f,2.f,false);return t.r[0].y<0?-1.f:1.f;}();
+    const C3D_FVec &x=projection.r[1],&y=projection.r[0],&q=projection.r[3];
+    for(int c=0;c<4;++c){
+        const float s=.5f*(horizontalSign*x.c[c]+q.c[c]),t=.5f*(q.c[c]-verticalSign*y.c[c]);
+        rows[0].c[c]=uv[0]*s+uv[1]*t+uv[2]*q.c[c];
+        rows[1].c[c]=q.c[c]-(uv[3]*s+uv[4]*t+uv[5]*q.c[c]);
+        rows[2].c[c]=q.c[c];
+    }
+}
 void Renderer::resetMaterialUniforms(){
     if(uvDirty_){
         C3D_FVUnifSet(GPU_VERTEX_SHADER,uvRowLoc_[0],1,0,0,0);C3D_FVUnifSet(GPU_VERTEX_SHADER,uvRowLoc_[1],0,1,0,0);
@@ -793,6 +814,17 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
                 C3D_TexEnvOpRgb(e1,GPU_TEVOP_RGB_SRC_COLOR,GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR,GPU_TEVOP_RGB_SRC_COLOR);
                 C3D_TexEnvFunc(e1,C3D_RGB,GPU_MULTIPLY_ADD);
             }
+            if(!(s.flags&1)&&((s.animationFrames>>16)&255)==3){
+                // GX sea (ef_sea): stage 0 leaves P = lerp(X, Y, projected glow);
+                // GX stage 1 adds lerp(Z, P, wave): P*(1+T1) + Z*(1-T1), Z the
+                // reflection constant. The first sum saturates only where the
+                // GX result does (the second term is never negative).
+                C3D_TexEnvSrc(e1,C3D_RGB,GPU_PREVIOUS,GPU_TEXTURE1,GPU_PREVIOUS);C3D_TexEnvFunc(e1,C3D_RGB,GPU_MULTIPLY_ADD);
+                auto* e2=C3D_GetTexEnv(2);C3D_TexEnvColor(e2,s.reflectionConstant);
+                C3D_TexEnvSrc(e2,C3D_RGB,GPU_CONSTANT,GPU_TEXTURE1,GPU_PREVIOUS);
+                C3D_TexEnvOpRgb(e2,GPU_TEVOP_RGB_SRC_COLOR,GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR,GPU_TEVOP_RGB_SRC_COLOR);
+                C3D_TexEnvFunc(e2,C3D_RGB,GPU_MULTIPLY_ADD);
+            }
             if(s.menuReflection){
                 // GX: clamp(albedo*rasC + C1), then + reflection*APREV
                 // (APREV = albedo alpha * authored konst) or * konst RGB.
@@ -912,6 +944,17 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
         const GPU_TEXTURE_WRAP_PARAM wraps[]={GPU_CLAMP_TO_EDGE,GPU_REPEAT,GPU_MIRRORED_REPEAT,GPU_CLAMP_TO_EDGE};
         C3D_TexSetWrap(texture,wraps[(s.flags>>8)&3],wraps[(s.flags>>10)&3]);
         setSampler(texture,s.sampler&0xffffu);
+        // A projection-mapped unit 0 samples a projection-mode copy at the
+        // coordinates the shader derives from the eye position (projRow0..2).
+        const bool projected=s.sampler&SamplerProjected;
+        if(projected){
+            C3D_FVec rows[3];projectedRows(projection_,horizontalSign_,s.reflectionUv,rows);
+            for(int r=0;r<3;++r)C3D_FVUnifSet(GPU_VERTEX_SHADER,projRowLoc_[r],rows[r].x,rows[r].y,rows[r].z,rows[r].w);
+            projectedTexture_=*texture;
+            projectedTexture_.param=(projectedTexture_.param&~GPU_TEXTURE_MODE(7))|GPU_TEXTURE_MODE(GPU_TEX_PROJECTION);
+            texture=&projectedTexture_;
+        }
+        if(projected!=projectedUv0_){C3D_BoolUnifSet(GPU_VERTEX_SHADER,projectedUv0Loc_,projected);projectedUv0_=projected;}
         C3D_TexBind(0,texture);
         auto* secondary=secondaryIndex>=0?&model.textures[secondaryIndex]->gpu:&white_;
         C3D_TexSetWrap(secondary,wraps[(s.flags>>16)&3],wraps[(s.flags>>18)&3]);
@@ -963,6 +1006,7 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
     if(pendingEnd)retailEndSubmesh();
     // Later draws (sprites, sparks, other models) expect identity UV rows/tint.
     resetMaterialUniforms();
+    if(projectedUv0_){C3D_BoolUnifSet(GPU_VERTEX_SHADER,projectedUv0Loc_,false);projectedUv0_=false;}
     if(skinPalette_)C3D_BoolUnifSet(GPU_VERTEX_SHADER,skinnedLoc_,false);
     if(litSkin){
         AttrInfo_Init(attr);AttrInfo_AddLoader(attr,0,GPU_FLOAT,3);AttrInfo_AddLoader(attr,1,GPU_FLOAT,3);AttrInfo_AddLoader(attr,2,GPU_FLOAT,4);AttrInfo_AddLoader(attr,3,GPU_UNSIGNED_BYTE,4);

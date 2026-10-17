@@ -26,6 +26,7 @@
 #include <mkw/kart_start_effects.hpp>
 #include <mkw/kart_smoke_effects.hpp>
 #include <mkw/kart_terrain_effects.hpp>
+#include <mkw/kart_drift_effects.hpp>
 #include <mkw/race_results.hpp>
 #include <mkw/trick_presentation.hpp>
 #include <mkw/race_items.hpp>
@@ -370,7 +371,7 @@ static void drawMenuBackdrop(mkw::Renderer &renderer, mkw::MenuRenderer &menuRen
 // The build version in the lower screen's corner, in the console's 8x8 font,
 // until the first race draws that screen. The lower framebuffer is BGR8,
 // rotated: w is the screen's height and columns run bottom to top.
-static constexpr const char *ProjectUrl = "github.com/MiniBandit/MKW-3DS";
+static constexpr const char *ProjectUrl = "github.com/ThePhilosophicalOne/MKW-3DS";
 // One line of 8x8 console-font text on the lower screen (BGR8, rotated: w is
 // the screen's height and columns run bottom to top).
 static void drawText(u8 *framebuffer, u16 w, int left, int top, const char *text, u32 rgb)
@@ -495,14 +496,14 @@ static bool sdContentReady()
     printf("\n  Mario Kart Wii 3DS\n\n");
     if (!found[0])
     {
-        printf("  This is a code update, not the whole game.\n  It needs a game built with v0.5.0 or newer.\n\n");
+        printf("  This is a code update, not the whole game.\n  It needs a game built with v0.6.0 or newer.\n\n");
         printf("  You build the game yourself, on your\n  computer, from your own Mario Kart Wii\n  disc. It can't be downloaded.\n\n");
         printf("  Builder and instructions:\n  %s\n\n", ProjectUrl);
-        printf("  Built with v0.5.0 or newer? Copy\n  build/release/sd-card/3ds to the root\n  of your SD card, or install your full CIA.\n");
+        printf("  Built with v0.6.0 or newer? Copy\n  build/release/sd-card/3ds to the root\n  of your SD card, or install your full CIA.\n");
     }
     else
     {
-        printf("  Your game files are from an older (or a\n  different) builder than this update needs.\n  Quick updates need v0.5.0 or newer.\n\n");
+        printf("  Your game files are from an older (or a\n  different) builder than this update needs.\n  Quick updates need v0.6.0 or newer.\n\n");
         printf("  Download the latest builder and build the\n  game again, then copy build/release/\n  sd-card/3ds to your SD card.\n\n");
         printf("  Help: %s\n", ProjectUrl);
     }
@@ -1885,8 +1886,11 @@ int main()
     // KartEffect's per-wheel floor effects (mkw/kart_terrain_effects.hpp).
     auto terrainEffectsStorage = std::make_unique<mkw::KartTerrainEffects>();
     auto &terrainEffects = *terrainEffectsStorage;
+    // KartEffect's drift group for each racer no local player drives (mkw/kart_drift_effects.hpp).
+    auto kartDriftStorage = std::make_unique<mkw::KartDriftEffects>();
+    auto &kartDrift = *kartDriftStorage;
     auto resetKartFx = [&]()
-    {for(unsigned i=0;i<kartFx.size();++i)kartFx[i].reset(i,i==0);kartFxLod=KartFxLod{};playerSmoke={};remoteSmoke.reset();landingEffects.reset();
+    {for(unsigned i=0;i<kartFx.size();++i)kartFx[i].reset(i,i==0);kartFxLod=KartFxLod{};playerSmoke={};remoteSmoke.reset();landingEffects.reset();kartDrift.reset();
      terrainEffects.reset(K::System::RaceConfig::Instance() ? unsigned(K::System::RaceConfig::Instance()->raceScenario().course) : ~0u); };
     resetKartFx();
     bool raceVfxReady = false;
@@ -1913,6 +1917,41 @@ int main()
             report(failure);
             return false;
         }
+        // The remote racers' drift emitters (mkw/kart_drift_effects.hpp) come from the full
+        // RKRace table that tools/cook_effect_archives.py puts on the SD card, appended to the
+        // race table when race-effects.bin lacks them. A refused merge keeps the race table.
+        if (!kartDrift.bind(raceEffects))
+        {
+            auto readAsset = [](const char *path, std::vector<uint8_t> &out)
+            {
+                if (mkw::pack::read(path, out))
+                    return true;
+                FILE *f = fopen(path, "rb");
+                if (!f)
+                    return false;
+                const long size = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+                bool ok = size > 0 && size <= 2 * 1024 * 1024 && fseek(f, 0, SEEK_SET) == 0;
+                if (ok)
+                {
+                    out.resize(size_t(size));
+                    ok = fread(out.data(), 1, out.size(), f) == out.size();
+                }
+                fclose(f);
+                return ok;
+            };
+            std::vector<uint8_t> table, archive;
+            unsigned appended = 0;
+            if (readAsset("textures/race-effects.bin", table) && readAsset("textures/fx/common_rkrace/common_rkrace_1.refx", archive))
+                appended = mkw::appendRefxEmitters(table, archive, mkw::KartDriftEffects::Names, mkw::KartDriftEffects::FxCount);
+            if (appended && !raceEffects.loadMemory(table.data(), table.size()) && !raceEffects.load("textures/race-effects.bin"))
+            {
+                report("FAIL race-effects.bin reload");
+                return false;
+            }
+            const bool bound = kartDrift.bind(raceEffects);
+            if (kQa)
+                LOGF("cpu drift fx: appended=%u emitters from common_rkrace_1 specs=%s", appended, bound ? "all" : "missing");
+        }
         for (unsigned i = 0; i < raceEffects.textures.size(); ++i)
         {
             auto &texture = (*effectTextures)[i];
@@ -1920,7 +1959,11 @@ int main()
                 continue;
             const char *name = raceEffects.textures[i].name;
             char path[64];
-            snprintf(path, sizeof path, "textures/%s.t3x", name);
+            // Textures of the appended archive emitters stay in the archive's folder.
+            if (!std::strncmp(name, "fx_common_rkrace_", 17))
+                snprintf(path, sizeof path, "textures/fx/common_rkrace/%s.t3x", name);
+            else
+                snprintf(path, sizeof path, "textures/%s.t3x", name);
             bool vram = false;
             for (const char *slip : {"fx_rk_wave0", "fx_rk_wave5_5", "fx_rk_wave2"})
                 vram |= !std::strcmp(name, slip);
@@ -3992,6 +4035,12 @@ int main()
                         }
                         kartFxLod.lod.update(0, 0, local, kartFxLod.clip);
                         uint32_t calcGroups = ~0u, drawGroups = ~0u;
+                        kartDrift.beginStep();
+                        // This step's activateMushroom calls (item use, course Mushroom), for the boost flame.
+                        std::array<bool, mkw::KartDriftEffects::MaxRacers> mushroomUsed{};
+                        for (const auto &e : raceItems->events())
+                            if (e.effect == mkw::ItemEffect::Mushroom && e.player < mushroomUsed.size())
+                                mushroomUsed[e.player] = true;
                         for (unsigned i = 0; i < racers; ++i)
                         {
                             const auto *racer = K::Kart::KartObjectManager::Instance()->object(i);
@@ -4138,6 +4187,53 @@ int main()
                                                  racer->inputs()->currentState().accelerate(), racer->collisionData(l).bFloor, racer->collisionData(r).bFloor,
                                                  bike, status.onBit(St::Burnout), in.beforeRespawn || in.bullet,
                                                  move->startEffectSerial(), move->startEffectDuration(), kartFxLod.lod.lod(i));
+                                // KartEffect's drift group (0x80698028 kart, 0x80698F70 bike): drift smoke and the
+                                // remote Spark01S sparks; and its boost flame (rk_miniTurboS, 0x806A3AC4). A ghost
+                                // (+0x12b) gets other handles (not ported).
+                                if (!raceGrid.ghost(i))
+                                {
+                                    mkw::KartDriftEffects::Input d;
+                                    d.pose = frame;
+                                    d.pose.scale = 1;
+                                    d.bike = bike;
+                                    d.insideBike = bike && racer->param()->stats().driftType == K::Kart::KartParam::Stats::DriftType::Inside_Drift_Bike;
+                                    // +0x7bc/+0x7c8 (0x80693E94): a kart's rear wheels, a bike's front and rear.
+                                    const unsigned w0 = bike ? 0 : l, w1 = bike ? 1 : r;
+                                    d.wheel[0] = vec(racer->wheelEdgePos(w0));
+                                    d.wheel[1] = vec(racer->wheelEdgePos(w1));
+                                    d.floor[0] = racer->hasFloorCollision(racer->tirePhysics(w0));
+                                    d.floor[1] = racer->hasFloorCollision(racer->tirePhysics(w1));
+                                    if (bike && d.floor[1])
+                                        d.rearFloorNormal = vec(racer->collisionData(w1).floorNrm);
+                                    d.driftState = unsigned(move->driftState());
+                                    d.driftAuto = status.onBit(St::DriftAuto);
+                                    d.hopStickX = move->hopStickX();
+                                    d.mtCharge = move->mtCharge();
+                                    d.scaled = mkw::KartItemEffects::effectScale(in, d.scale);
+                                    d.pressed = in.pressed;
+                                    d.vanished = status.onBit(St::Vanished);
+                                    d.bullet = in.bullet;
+                                    // The boost flame's inputs: this step's boost activations and the pipes.
+                                    d.boostVoice = (kartContacts[i].cues & uint32_t(K::Kart::KartMove::SoundCue::BoostVoice)) != 0;
+                                    d.allMtActive = move->boostActive(K::Kart::KartBoost::Type::AllMt);
+                                    d.miniTurbo = uint16_t(racer->param()->stats().miniTurbo);
+                                    d.startSerial = move->startEffectSerial();
+                                    d.startFrames = move->startEffectDuration();
+                                    d.mushroom = mushroomUsed[i];
+                                    d.beforeRespawn = in.beforeRespawn;
+                                    d.inAction = in.inAction;
+                                    if (K::System::RaceManager::Instance()->stage() >= K::System::RaceManager::Stage::Race)
+                                        for (unsigned w = 0; w < wheels; ++w)
+                                        {
+                                            const auto &c = racer->collisionData(w);
+                                            d.onBoostPanel |= c.bFloor && (uint32_t(c.closestFloorFlags) & ((1u << 6) | (1u << 7))) != 0;
+                                        }
+                                    d.exhaust = &mkw::VehicleExhausts[std::min(35u, unsigned(K::System::RaceConfig::Instance()->raceScenario().players[i].vehicle))];
+                                    d.diving = in.diving;
+                                    d.hasSea = in.hasSea;
+                                    d.seaHeight = in.seaHeight;
+                                    kartDrift.step(raceEffects, i, d, kartFxLod.lod.lod(i));
+                                }
                             }
                             // A racer's group calculates (0x80678818) and draws (0x80678aec)
                             // without +7 or with +9.
@@ -4147,6 +4243,10 @@ int main()
                             if (!kartFxLod.lod.draws(i, 0, keep))
                                 drawGroups &= ~mkw::KartFxSlots::groupBit(i);
                         }
+                        kartDrift.endStep();
+                        // QA: steps so far on which some CPU emitted drift sparks / drift smoke; CPU boost flame starts.
+                        if (kQa && physicsSteps % 600 == 0)
+                            LOGF("cpu drift fx step=%u spark_steps=%u smoke_steps=%u flame_starts=%u", physicsSteps, kartDrift.sparkFrames(), kartDrift.smokeFrames(), kartDrift.flameStarts());
                         raceEffects.setGroups(calcGroups, drawGroups);
                     }
                     raceEffects.step();

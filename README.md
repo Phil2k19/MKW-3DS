@@ -3,6 +3,11 @@
 A native Nintendo 3DS port of Mario Kart Wii, continued by **MiniBandit** from
 the original port by **dudewhat**.
 
+This is **ThePhilosophicalOne's fork** of MiniBandit's v0.5.2: a
+retail-accuracy pass that makes the port behave like the Wii game. It's a
+**work in progress**: expect bugs. Its builder and quick updates are separate
+from MiniBandit's.
+
 This repository contains **no Nintendo files**. It builds an installable CIA
 on your own computer from your own Mario Kart Wii disc.
 
@@ -11,6 +16,24 @@ It isn't an emulator. The game runs natively on the 3DS: kart physics come from
 physics, and rendering, audio and menus are written for the 3DS hardware. The
 builder converts the disc's courses, characters, vehicles, menus, movies and
 sound into 3DS formats.
+
+## What's new in this fork (v0.6.0)
+
+Most changes were checked against the retail game's code (the source comments
+cite the PAL addresses).
+
+- **Time Trial ghosts**: your best time is saved as a ghost; copy any `.rkg` ghost to `sd:/3ds/mkw-3ds/ghosts` to race it; Watch the Replay
+- **Course intros** as on the Wii: fades, the flyover, the course and cup title card; A skips
+- **Sound**: the retail menu and race sound flow and fades, correct pitches, rank up/down sounds, character voices, the item warning alarm, dropped-item sounds
+- **Driver animations**: finish poses, item throws, hit reactions
+- **CPU racers**: retail vehicle choice, drifts with sparks and boosts, start boosts, recovery when stuck
+- **Items**: Goombas drop Mushrooms, triple shells, item warning icons, item box textures, item shadows
+- **Retail minimap** on the lower screen
+- **Courses**: sharper textures, the shining sea on Koopa Cape and the other coastal courses
+- **Menus**: faster pages, no dropped button presses, character and vehicle models as on the Wii
+- Kinoko physics fixes for ghosts, Goombas and CPUs (`patches/kinoko-arm11.patch`)
+
+Tested on the Azahar emulator. Please report how it runs on a real 3DS in [Issues](../../issues).
 
 ## What's new in this continuation
 
@@ -28,7 +51,7 @@ vehicles each):
 - Model and HUD fixes
 - HOME Menu name and icon, and the standard Nintendo 3DS start-up logo
 
-Still in progress: Coin Runners and Team VS. Not yet: Mirror, online play.
+Still in progress: Mirror, Coin Runners and Team VS. Not yet: online play.
 
 ## What you need
 
@@ -69,12 +92,13 @@ New 3DS / New 2DS run at 60 FPS (30 FPS with the 3D slider up); Old 3DS / 2DS at
 
 | You are… | What to do |
 |---|---|
-| **Built your game with v0.5.0 or newer** and copied `build/release/sd-card/3ds` to your SD card | ✅ **Scan the QR code below.** That's all. |
-| **Built with v0.4.1 or older** (or any older version) | ❌ **The QR code will NOT work for you.** Download the latest builder, build the game again and install the full CIA. After that, later updates are quick updates. |
+| **Built your game with this fork's builder, v0.6.0 or newer** and copied `build/release/sd-card/3ds` to your SD card | ✅ **Scan the QR code below.** That's all. |
+| **Built with MiniBandit's builder** (any version) | ❌ **The QR code will NOT work for you.** This fork converts the game files differently. Download this fork's builder from the [latest release](../../releases/latest), build the game again and install the full CIA. After that, later updates are quick updates. |
 | **Never built the game** (no CIA from your own disc) | ❌ **The QR code is not the game.** It is a small update of a game you build yourself from your own Mario Kart Wii disc. Without a built game and its SD files it only shows a "build the game first" message. Use the builder. |
-| **Built with v0.5.0 or newer but didn't copy the SD folder** | ❌ Copy `build/release/sd-card/3ds` to the **root of your SD card** first, then scan. |
+| **Built with v0.6.0 or newer but didn't copy the SD folder** | ❌ Copy `build/release/sd-card/3ds` to the **root of your SD card** first, then scan. |
 
-**Windows:** games built on Windows with v0.5.0 or v0.5.1 are refused by the v0.5.1 update (fixed in v0.5.2: use the latest update).
+MiniBandit's QR codes and store install MiniBandit's updates: don't use them on a
+game built with this fork.
 
 If you're unsure which version you built with, **build again with the latest
 builder**: it always works. The game also tells you on start-up when its files
@@ -128,6 +152,7 @@ Please test changes on an emulator (Azahar) or real hardware before submitting.
 
 - **dudewhat**: the original Mario Kart Wii 3DS port and CIA builder this project continues
 - **MiniBandit**: this continuation
+- **ThePhilosophicalOne**: this fork's retail-accuracy pass
 - **Epic0522**: graphics upgrades: lighting, kart shadows, water, effects and menu highlights
 - **DarthMDev**: Old 3DS drawing performance fix
 - [Kinoko](https://github.com/vabold/Kinoko) by vabold (MIT): Mario Kart Wii physics

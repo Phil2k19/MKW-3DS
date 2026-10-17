@@ -87,6 +87,10 @@ struct ItemActor {
     uint8_t bounceLimit=10;
     bool active=false, explosion=false,backwards=false;
     bool settled=false, scattered=false;
+    // Sound only: fn_1_2A655C (PAL 0x807B6910) ran, the object came to rest and played its land
+    // sound (ObjProperties +0x68). Retail's rest state (fn_1_2A6848 0x807B6BFC) plays nothing, so
+    // the sound does not repeat when `settled` lapses for a frame without floor contact.
+    bool rested=false;
     // ItemObj +0x78 bit 0x2000: a course object bounced it (fn_1_291548 response 1); its next
     // scatter step (fn_1_296F9C) cannot land it (fn_1_291F98) and clears the bit.
     bool objectBounce=false;

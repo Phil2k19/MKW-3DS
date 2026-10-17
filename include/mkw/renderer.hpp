@@ -41,7 +41,9 @@ struct Submesh { uint32_t first,count; int32_t texture; uint32_t flags; int32_t 
     float reflectionUv[6]{};
     // GMDL v6: the GX sampler of texture units 0 (bits 0..15) and 1 (16..31):
     // per unit the GX minFilter + 1 (0: unknown) and, at bit 8, the lodBias in
-    // signed 1/32 steps (tools/cook_model.py).
+    // signed 1/32 steps (tools/cook_model.py). Bit 3 (unit 0 only): a GX
+    // projection-mapped texgen, the camera's screen position through the
+    // texture SRT in reflectionUv (menuReflection 0; the sea's glow).
     uint32_t sampler=0; };
 static_assert(offsetof(Submesh,menuReflection)==56&&offsetof(Submesh,sampler)==92&&sizeof(Submesh)==96,"GMDL v6 submesh stride");
 struct CourseLighting;
@@ -485,6 +487,11 @@ private:
     int projectionLoc_=-1,modelViewLoc_=-1,lightLoc_=-1,uvScrollLoc_=-1;
     int envRowLoc_[3]={-1,-1,-1},envParamLoc_=-1,uv1RowLoc_[2]={-1,-1};
     int uvRowLoc_[4]={-1,-1,-1,-1},tintLoc_=-1;
+    // Unit 0 projection mapping (Submesh::sampler bit 3): its rows, the shader
+    // switch while set, and the projection-mode copy bound until the draw.
+    int projRowLoc_[3]={-1,-1,-1},projectedUv0Loc_=-1;
+    bool projectedUv0_=false;
+    C3D_Tex projectedTexture_{};
     bool uvDirty_=false,tintDirty_=false;
     void resetMaterialUniforms();
     // Retail course lighting (renderer_retail.cpp).

@@ -143,8 +143,12 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
  version=5 if any(shape.get('reflection') for model in data['models'] for shape in model['shapes']) else 4 if any(shape.get('retail') for model in data['models'] for shape in model['shapes']) else 3
  # GMDL v6 (texel_budget cooks) appends the GX sampler state of texture units 0
  # and 1: per unit 16 bits, the GX minFilter + 1 (0: unknown) and the lodBias in
- # signed 1/32 steps (the GX register's precision) at bit 8.
+ # signed 1/32 steps (the GX register's precision) at bit 8. Unit 0's bit 3: a
+ # GX projection-mapped texgen (tools/export_brres.ts projectedGlow), sampled in
+ # PICA projection mode through the texture SRT stored in the reflection uv.
  if texel_budget:version=6
+ if version<6 and any(shape.get('projectedGlow') for model in data['models'] for shape in model['shapes']):
+  raise ValueError('A projected texgen needs GMDL v6 (texel_budget)')
  def sampler(texture,map_index,samplers):
   if texture<0:return 0
   name=data['textures'][texture]['name']
@@ -202,14 +206,20 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
       raise ValueError('Sky screen blend conflicts with another material equation')
      # P + cloud*(1-P), after the authored sky/raster stage.
      extended |= 2<<16
+    glow=shape.get('projectedGlow')
+    if glow:
+     if flags&1 or shape.get('textureAlphaAdd') or shape.get('skyScreenBlend'):
+      raise ValueError('Projected glow conflicts with another material equation')
+     # GX sea: P*(1+T1) + Z*(1-T1) after the stage-0 colour lerp P (Z: reflection constant).
+     extended |= 3<<16
     material=[tex,flags,shape['secondary'],constant,*shape['uvVelocity'],shape['animationFrames']|extended]
     if version>=4:material+=retail_lighting(shape)
     if version>=5:
      reflection=shape.get('reflection')
-     material+=([reflection['mode'],reflection['constant'],reflection['add'],*reflection['uv']] if reflection else [0]*9)
+     material+=([reflection['mode'],reflection['constant'],reflection['add'],*reflection['uv']] if reflection else [0,glow['constant'],0,*glow['uv']] if glow else [0]*9)
     if version==6:
      samplers=(shape.get('sourceMaterial') or {}).get('samplers',[])
-     material.append(sampler(tex,shape['primaryMap'],samplers)|sampler(shape['secondary'],shape['secondaryMap'],samplers)<<16)
+     material.append(sampler(tex,shape['primaryMap'],samplers)|(8 if glow else 0)|sampler(shape['secondary'],shape['secondaryMap'],samplers)<<16)
     if not subs or subs[-1][2:]!=material or (preserve_vertices and start==0):subs.append([len(indices),0,*material])
     for v in tri:
      if preserve_vertices:indices.append(len(vertices));vertices.append(v)
