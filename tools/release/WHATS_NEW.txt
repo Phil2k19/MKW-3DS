@@ -1,6 +1,15 @@
 ThePhilosophicalOne fork (in progress)
-Fixed: Drift page movies were see-
-  through; unselected movies now dim
-  as on the Wii
-Fixed: a ? showed behind every vehicle
-Fixed: Main Menu titles looked blurry
+Fixed: place number shadow is back
+Fixed: lap count went down when
+  reversing over the line
+Fixed: OK sound repeated on spam
+Fixed: eyes stared at the camera on
+  the seated menu pages
+Fixed: Single Player title flashed
+Fixed: invisible Toad Factory crates
+Fixed: DK Mountain/Maple cannons
+  looped their launch forever
+Fixed: Delfino bridge, Ghost Valley 2
+  blocks, N64 Bowser lava columns
+Fixed: Gold Mine item boxes, Moonview
+  squish camera, Koopa Cape glass
