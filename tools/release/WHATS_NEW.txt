@@ -1,3 +1,6 @@
 ThePhilosophicalOne fork (in progress)
-Fixed: the kart kept steering a little
-  after letting go of the Circle Pad
+Fixed: Drift page movies were see-
+  through; unselected movies now dim
+  as on the Wii
+Fixed: a ? showed behind every vehicle
+Fixed: Main Menu titles looked blurry
