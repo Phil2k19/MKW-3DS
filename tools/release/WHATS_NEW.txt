@@ -1,12 +1,3 @@
 ThePhilosophicalOne fork (in progress)
-Time Trial ghosts, Watch the Replay
-Look behind on X or ZL
-Course intros with fades, title card
-Retail menu and race sounds, voices
-Retail driver animations and poses
-CPU AI: vehicles, drifts, sparks
-Item warnings, Goombas, triples
-Retail minimap on the lower screen
-Sharper course textures, sea shine
-Faster, more responsive menus
-Fixed: builder stopped at item shadows
+Fixed: the kart kept steering a little
+  after letting go of the Circle Pad
