@@ -9,3 +9,4 @@ Item warnings, Goombas, triples
 Retail minimap on the lower screen
 Sharper course textures, sea shine
 Faster, more responsive menus
+Fixed: builder stopped at item shadows

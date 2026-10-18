@@ -58,8 +58,12 @@ COOK_STEPS=[
  # The item box model comes from Luigi Circuit's archive, unpacked where the item cook expects it.
  ('Luigi Circuit archive',['{py}','tools/unpack_szs.py','data/extracted/Race/Course/beginner_course.szs','assets/luigi'],['assets/luigi/itembox.brres']),
  ('items and HUD',['{py}','tools/cook_race_items.py',SD,'--disc','{disc}'],[SD+'/models/race-items.json']),
+ # Item and item-box shadow volumes from Common.szs (drivers step) and Luigi Circuit's item box.
+ ('item shadows',['{py}','tools/cook_item_shadows.py'],['build/item-shadows/models/item-shadows.json']),
  ('world item lighting',['{py}','tools/cook_item_lighting.py'],['build/item-lighting/receipt.json']),
  ('race effects',['{py}','tools/cook_race_effects.py','--output','build/vfx/textures'],['build/vfx/textures/race-effects.bin']),
+ # The incoming-item warning icon, from the Race UI archives the items step unpacks.
+ ('item warning icons',['{py}','tools/cook_race_chase.py'],['build/vfx/textures/hud_chase_icon.t3x']),
  ('blast effects',['{py}','tools/cook_blast.py'],['build/vfx/models/bomb_blast.gmdl']),
  ('Lakitu',['{py}','tools/cook_lakitu.py'],['build/vfx/models/lakitu_body.dskm']),
  ('award ceremony',['{py}','tools/cook_ceremony.py','{disc}'],[SD+'/models/ceremony.json']),
