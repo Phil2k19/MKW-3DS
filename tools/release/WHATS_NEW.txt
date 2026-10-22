@@ -1,16 +1,16 @@
 ThePhilosophicalOne fork (in progress)
-Builder fix only; v0.6.4 fixes:
-Fixed: place number shadow is back
-Fixed: lap count went down when
-  reversing over the line
-Fixed: OK sound repeated on spam
-Fixed: eyes stared at the camera on
-  the seated menu pages
-Fixed: Single Player title flashed
-Fixed: invisible Toad Factory crates
-Fixed: DK Mountain/Maple cannons
-  looped their launch forever
-Fixed: Delfino bridge, Ghost Valley 2
-  blocks, N64 Bowser lava columns
-Fixed: Gold Mine item boxes, Moonview
-  squish camera, Koopa Cape glass
+Pause: frozen race behind, retail
+  buttons per mode, faster Continue
+CPUs stop items when you finish
+Lakitu flag follows you at the finish
+Results no longer faded after a fall
+Shells: retail slopes, throws, lava
+Blue Shell flies and flaps like retail
+Fire, lava, volcano, propeller effects
+Toll bars and DK Summit gates lift
+Rainbow Road star rings + sound
+Item boxes ride Grumble rocks
+SSMT sparks, wheelie swish sound
+Voices: Wiggler, Blue Shell throw,
+  TT goal, title; ghosts silent
+Seagulls, sand, penguin sounds
