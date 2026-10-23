@@ -1,6 +1,7 @@
 #include "mkw/race_items.hpp"
 #include "mkw/bobomb.hpp"
 #include "mkw/item_box.hpp"
+#include "mkw/item_rules.hpp"
 #include "mkw/race_item_internal.hpp"
 #include <algorithm>
 #include <cmath>
@@ -67,6 +68,43 @@ void RaceItems::courseMushroom(Vec3 position,Vec3 velocity,unsigned owner){
     // Its hitter is spared 7 frames.
     a.position=a.previous=position;a.velocity=velocity+Vec3{0,groundItem(a.kind,timeTrial_)?25.f:35.f,0};a.scattered=true;a.guidance={};a.target=-1;
     a.scale=.7f;a.radius=itemProperties(unsigned(a.kind)).releasedContact*a.scale;a.terrainRadius=itemProperties(unsigned(a.kind)).terrain*a.scale;
+    a.lifetime=1800;a.ownerImmunity=7;
+}
+void RaceItems::courseDrop(unsigned slot,Vec3 position,Vec3 velocity,unsigned owner,uint32_t randomWord){
+    // ItemSlotData::decideItem (PAL 0x807BB42C, called as decideItem(slot, 1, 1, 1, 0)): the
+    // first 16 items of the drop row, each only while its object type is under its limit (and,
+    // as in choose(), no spawn-timer item while its timer runs, no Bullet while one is out);
+    // Util::Random::nextU32(sum) on Kinoko's RaceManager word; an empty row gives a Mushroom.
+    const auto* row=courseDropOdds_.weights(slot);
+    if(!row)return;
+    auto weights=*row;
+    constexpr ItemKind delayed[]={ItemKind::Lightning,ItemKind::BlueShell,ItemKind::Blooper,ItemKind::Pow};
+    for(unsigned i=0;i<4;++i)if(itemSpawnTimers_[i])weights[unsigned(delayed[i])]=0;
+    bool bullet=false;for(unsigned i=0;i<count_;++i)bullet|=hud_[i].bullet||racers_[i].bullet;
+    std::array<unsigned,16> sums{};unsigned total=0;
+    for(unsigned i=0;i<16;++i){
+        const auto type=ItemObjects[i].type;
+        if(!((type==BulletObjectType&&bullet)||objectCount(type)>=ItemObjectLimits[type]))total+=weights[i];
+        sums[i]=total;
+    }
+    const unsigned draw=unsigned((uint64_t(randomWord)*total)>>32);
+    ItemKind kind=ItemKind::Mushroom;
+    for(unsigned i=0;i<16;++i)if(draw<sums[i]){kind=ItemKind(i);break;}
+    // fn_1_289C08 (0x80799FBC): nothing for owner 12; ItemHolder_spawnDirect (0x8079A12C):
+    // nothing while the type's holder is full (capacity +0xc). It never evicts a live object.
+    const unsigned type=ItemObjects[unsigned(kind)].type;
+    if(owner>=count_||objectCount(type)>=itemObjectCapacity(type))return;
+    auto it=actors_.end();
+    for(unsigned i=0;i<MaxActors&&it==actors_.end();++i)if(!actors_[i].active&&freeAtStepStart_[i])it=actors_.begin()+i;
+    if(it==actors_.end())it=std::find_if(actors_.begin(),actors_.end(),[](const ItemActor& a){return !a.active;});
+    if(it==actors_.end())return;
+    // As courseMushroom: scale 0.7, the scatter state with a pop up of 25 (35 for an item that
+    // is no ground item, or in time trials), the hitter spared 7 frames. Its matrix faces the
+    // launch velocity.
+    auto& a=*it;a={};a.kind=kind;a.owner=int8_t(owner);a.active=true;
+    a.position=a.previous=position;a.velocity=velocity+Vec3{0,groundItem(kind,timeTrial_)?25.f:35.f,0};a.scattered=true;
+    a.yaw=std::atan2(velocity.x,velocity.z);
+    a.scale=.7f;a.radius=itemProperties(unsigned(kind)).releasedContact*a.scale;a.terrainRadius=itemProperties(unsigned(kind)).terrain*a.scale;
     a.lifetime=1800;a.ownerImmunity=7;
 }
 ItemActor& RaceItems::spawn(unsigned player,ItemKind kind,bool backwards,const Vec3* origin){

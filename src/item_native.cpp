@@ -9,6 +9,8 @@
 #include <game/field/ObjectDrivableDirector.hh>
 #include <game/field/obj/ObjectDrivable.hh>
 #include <game/field/obj/ObjectItemboxPress.hh>
+#include <game/field/obj/ObjectAurora.hh>
+#include <game/field/obj/ObjectTwistedWay.hh>
 #include <game/field/RailInterpolator.hh>
 #include <game/field/RailManager.hh>
 #include <game/item/ItemDirector.hh>
@@ -22,7 +24,6 @@
 #include <game/system/RaceManager.hh>
 #include <game/system/RaceConfig.hh>
 #include <game/system/ResourceManager.hh>
-#include "mkw/race_audio.hpp"
 #endif
 #include <algorithm>
 #include <cmath>
@@ -97,10 +98,6 @@ public:
         const size_t n=director->checkItemObjectCollision(K::s16(type),K::u8(owner<12?owner:12),sourceVec(position),sourceVec(velocity),radius,held);
         unsigned out=0;
         for(size_t i=0;i<n&&out<max;++i)hits[out++]={nativeVec(director->hitDepth(i)),int16_t(director->reaction(i))};
-        // A Wiggler segment's item callback (PAL fn_1_1B6A8C): any item but a Bob-omb (object 9)
-        // flags it for the head's voice; GeoHitTableItemObj row 0xe2 never damages it.
-        for(size_t i=0;i<n;++i)if(type!=9&&director->collidingObject(i)->id()==K::Field::ObjectId::Hanachan)
-            noteRaceAudioHanachanBump(static_cast<const K::Field::ObjectBase*>(director->collidingObject(i)));
         return out;
     }
 };
@@ -137,6 +134,37 @@ BoxDrop dropStep(Vec3 at){
 // object's position and vf+0x114 (0x806813D8) adds the position back; no rotation (vf+0x118).
 bool ridesPosition(const K::Field::ObjectDrivable& obj){
     return obj.id()==K::Field::ObjectId::VolcanoRock||obj.id()==K::Field::ObjectId::VolcanoPiece;
+}
+// Drivables with their own ride slots (vf+0x104 also returns 1): the Rainbow Road aurora
+// (vtable 0x808D42A8) and the Bowser's Castle twisted road (0x808D62F8). Their vf+0x110 keeps a
+// record with flag 0x40, and the calc takes the box's position from their vf+0x118.
+bool ridesSurface(const K::Field::ObjectBase& obj){
+    return obj.id()==K::Field::ObjectId::Aurora||obj.id()==K::Field::ObjectId::TwistedWay;
+}
+// vf+0x110 (Aurora 0x807FB33C, TwistedWay 0x80814428) for a box resting at `at`.
+Vec3 surfaceRecord(const K::Field::ObjectBase& obj,Vec3 at){
+    const auto* race=K::System::RaceManager::Instance();
+    if(obj.id()==K::Field::ObjectId::Aurora)return nativeVec(static_cast<const K::Field::ObjectAurora&>(obj).calcRideOffset(sourceVec(at)));
+    return nativeVec(static_cast<const K::Field::ObjectTwistedWay&>(obj).calcRideRecord(sourceVec(at),race->timer(),
+            race->isStageReached(K::System::RaceManager::Stage::Race)));
+}
+// vf+0x118 (Aurora 0x807FB39C, TwistedWay 0x808145D8): the record's point on the surface. The
+// box's up (+0xd4) is not used by the item box code.
+Vec3 surfacePosition(const K::Field::ObjectBase& obj,Vec3 record,K::u32 timer,bool inRace){
+    K::EGG::Vector3f pos,up;
+    if(obj.id()==K::Field::ObjectId::Aurora)static_cast<const K::Field::ObjectAurora&>(obj).calcRidePos(sourceVec(record),timer,pos,up);
+    else static_cast<const K::Field::ObjectTwistedWay&>(obj).calcRidePos(sourceVec(record),timer,inRace,pos,up);
+    return nativeVec(pos);
+}
+// The s_itembox calc runs in the object pass, after RaceManager::calc has advanced RaceManager
+// +0x20 and the stage this step. stepMovers runs before the step, so it takes what that calc
+// is about to give: +1 from the countdown on, the race stage once the countdown ends.
+void rideFrame(K::u32& timer,bool& inRace){
+    using Stage=K::System::RaceManager::Stage;
+    const auto* race=K::System::RaceManager::Instance();
+    timer=race->timer();inRace=race->isStageReached(Stage::Race);
+    if(inRace)++timer;
+    else if(race->isStageReached(Stage::Countdown)){++timer;inRace=race->getCountdownTimer()<=1;}
 }
 std::shared_ptr<K::Field::RailInterpolator> boxRail(int path,float speed,unsigned start){
     const auto* map=K::System::CourseMap::Instance();
@@ -209,15 +237,24 @@ void RaceItems::nativeKartBump(void* context,size_t attacker,size_t victim){
 static void courseMushroomHook(void* context,const K::EGG::Vector3f& position,const K::EGG::Vector3f& velocity,uint8_t owner){
     static_cast<RaceItems*>(context)->courseMushroom({position.x,position.y,position.z},{velocity.x,velocity.y,velocity.z},owner);
 }
+// Kinoko ItemDirector::CreateCourseDrop: a broken crate's item.
+static void courseDropHook(void* context,K::u16 slot,const K::EGG::Vector3f& position,const K::EGG::Vector3f& velocity,uint8_t owner,K::u32 randomWord){
+    static_cast<RaceItems*>(context)->courseDrop(slot,{position.x,position.y,position.z},{velocity.x,velocity.y,velocity.z},owner,randomWord);
+}
 void RaceItems::unhookNative(){
     K::Kart::KartCollide::SetItemCollisionHook(nullptr,nullptr);
     K::Kart::KartCollide::SetKartBumpHook(nullptr,nullptr);
     K::Item::ItemDirector::ClearCoursePickupHook(this);
+    K::Item::ItemDirector::ClearCourseDropHook(this);
 }
 void RaceItems::stepMovers(){
     using Status=K::Field::RailInterpolator::Status;
     // s_itembox on a drivable (calc 8082945c, before the drivables' own calc this step).
-    for(const auto& r:rides_)boxes_[r.box].position=nativeVec(r.object->pos())+r.offset;
+    K::u32 timer=0;bool inRace=false;rideFrame(timer,inRace);
+    for(const auto& r:rides_){
+        if(ridesSurface(*r.object))boxes_[r.box].position=surfacePosition(*r.object,r.offset,timer,inRace)+Vec3{0,ItemBoxHeight,0}+Vec3{0,r.lift,0};
+        else boxes_[r.box].position=nativeVec(r.object->pos())+r.offset;
+    }
     for(auto& p:presses_){
         auto& box=boxes_[p.box];const auto* rail=p.object->railInterpolator();
         if(p.object->state()==0||!rail){p.taken=false;box.active=false;box.respawn=0;continue;}
@@ -293,8 +330,14 @@ void RaceItems::resetFromCourse(unsigned count,uint32_t seed){
                 rides.push_back({landed.ride,uint16_t(boxes.size()),box.position-nativeVec(landed.ride->pos())});
                 boxes.push_back(box);continue;
             }
-            // Elsewhere it stays where it landed (retail rides the Rainbow Road aurora and the
-            // Bowser's Castle twisted road too; their ride slots are not ported).
+            if(landed.hit&&landed.ride&&ridesSurface(*landed.ride)){
+                // The init attaches the box where it landed (pos -= tangentOff, then vf+0x110);
+                // stepMovers puts it at the surface position + (0,180,0) + setting 6.
+                const Vec3 at=drop-landed.push;
+                rides.push_back({landed.ride,uint16_t(boxes.size()),surfaceRecord(*landed.ride,at),float(lift)});
+                boxes.push_back(courseItemBox(at,lift,i));continue;
+            }
+            // Elsewhere it stays where it landed.
             Vec3 at=nativeVec(obj->pos());
             for(unsigned step=0;step<1000;++step){
                 K::Field::CollisionInfo info{};info.reset();K::Field::KCLTypeMask mask=0;
@@ -362,6 +405,7 @@ void RaceItems::resetFromCourse(unsigned count,uint32_t seed){
     K::Kart::KartCollide::SetItemCollisionHook(&RaceItems::nativeKartPass,this);
     K::Kart::KartCollide::SetKartBumpHook(&RaceItems::nativeKartBump,this);
     K::Item::ItemDirector::SetCoursePickupHook(&courseMushroomHook,this);
+    K::Item::ItemDirector::SetCourseDropHook(&courseDropHook,this);
 }
 void RaceItems::snapshotNative(unsigned count,std::array<ItemRacer,MaxRacers>& out) const{
     for(unsigned i=0;i<std::min(count,MaxRacers);++i)out[i]=snapshot(i);

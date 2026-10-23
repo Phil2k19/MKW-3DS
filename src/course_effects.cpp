@@ -5,13 +5,20 @@
 #include "mkw/race_effects.hpp"
 #include "mkw/render_quality.hpp"
 #include "mkw/renderer.hpp"
+// Kinoko's ObjectBreakable::enableCollision hides ObjectBase's const one, a warning
+// reported at ObjectBase.hh: silenced over the Kinoko headers (as in course_object_kinds.cpp).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverloaded-virtual"
 #include <game/field/ObjectDirector.hh>
 #include <game/field/RailManager.hh>
 #include <game/field/obj/ObjectFlamePoleV.hh>
+#include <game/field/obj/ObjectKoopaFigure.hh>
 #include <game/field/obj/ObjectKoopaFigure64.hh>
 #include <game/field/obj/ObjectPropeller.hh>
 #include <game/field/obj/ObjectVolcanoBall.hh>
 #include <game/field/obj/ObjectVolcanoBallLauncher.hh>
+#include <game/field/obj/ObjectWoodbox.hh>
+#pragma GCC diagnostic pop
 #include <game/kart/KartObjectManager.hh>
 #include <game/system/CourseMap.hh>
 #include <game/system/RaceConfig.hh>
@@ -85,6 +92,9 @@ constexpr ArchiveUse Archives[]={
     {0x1a6,"rk_epropeller"}, // Epropeller (ctor 0x80764CC8)
     {0x259,"rk_dkcannon"},   // DonkyCannonGC (calc 0x806BFED0)
     {0x261,"rk_dkcannon"},   // tree_cannon
+    {0x070,"rk_woodbox"},    // Woodbox: rk_woodbox (0x8077E6B8)
+    {0x0d3,"rk_woodbox"},    // W_Woodbox's crates
+    {0x171,"rk_koopaball"},  // koopaFigure: rk_koopaBallS, rk_koopaBall (ctor 0x80771FB0)
 };
 constexpr uint16_t DonkyCannonGC=0x259,TreeCannon=0x261;
 
@@ -169,7 +179,7 @@ uint16_t chrFrames(const char* name){
     return be16(d+chr+0x20);
 }
 
-enum class Kind:uint8_t{Pole,Statue,Propeller,Ball,Cannon};
+enum class Kind:uint8_t{Pole,Statue,Propeller,Ball,Cannon,Crate,Figure};
 struct Handle{ef::Effect* effect=nullptr;uint16_t serial=0;};
 struct Tracked {
     Kind kind;
@@ -177,7 +187,7 @@ struct Tracked {
     const K::System::MapdataGeoObj* geo=nullptr;
     Clip clip;
     std::array<Handle,3> fx{};
-    uint32_t frame=480;    // statue in the kart-triggered mode: +0xc8 (init 0x806DAA44)
+    uint32_t count=0;      // crate: breaks seen; Bowser's statue: mouth openings seen
     bool hidden=false;     // ball: +0xf8, the clip result its calc stored a step before
     Vec3 start{};          // ball: its rail's first point (init 0x806E2C4C)
     int64_t shot=-1;       // cannon: the timer of the last shot start
@@ -201,11 +211,11 @@ struct CourseEffects::Impl {
     bool driftRead=false,baseKnown=false,merged=false;
     unsigned baseEmitters=0,baseTextures=0,textureCount=0;
     struct Ids{int flamePole=-1,flamePoleS=-1,flamePoleL=-1,koopaFire=-1,koopaFireL=-1,volcErupt=-1,volcBrk=-1,
-               volcTail=-1,volcTailS=-1,volcFire=-1,volcFireS=-1,epropeller=-1,epropellerS=-1,dkCannon=-1;} ids;
+               volcTail=-1,volcTailS=-1,volcFire=-1,volcFireS=-1,epropeller=-1,epropellerS=-1,dkCannon=-1,
+               woodbox=-1,koopaBall=-1,koopaBallS=-1;} ids;
     std::vector<Tracked> objects;
     unsigned generation=~0u;
-    std::array<Vec3,12> kartPos{};
-    bool kartPosValid=false,cannonStart=false,lookBack=false;
+    bool cannonStart=false,lookBack=false;
     uint16_t serial=0;
     char summary[192]="course fx: not loaded";
 
@@ -247,7 +257,7 @@ struct CourseEffects::Impl {
     // Kill (+0x18, 0x80222EF4): emitters and particles retire.
     void kill(ef::System& s,Handle& h){if(alive(s,h))s.retireEffect(*h.effect);h={};}
     void rebuild();
-    void stepObject(ef::System& s,Tracked& t,uint32_t timer,unsigned screens,bool timeTrial,unsigned players);
+    void stepObject(ef::System& s,Tracked& t,uint32_t timer,unsigned screens);
 };
 
 CourseEffects::CourseEffects():impl_(std::make_unique<Impl>()){}
@@ -317,7 +327,8 @@ bool CourseEffects::load(RaceEffects& effects,Texture* textures,unsigned capacit
     };
     m.ids={find("rk_flamePole"),find("rk_flamePoleS"),find("rk_flamePoleL"),find("rk_koopaFire"),find("rk_koopaFireL"),
            find("rk_volcErupt"),find("rk_volcBrk"),find("rk_volcTail"),find("rk_volcTailS"),find("rk_volcFire_L"),
-           find("rk_volcFire_LS"),find("rk_epropeller"),find("rk_epropellerS"),find("rk_dkCannon")};
+           find("rk_volcFire_LS"),find("rk_epropeller"),find("rk_epropellerS"),find("rk_dkCannon"),
+           find("rk_woodbox"),find("rk_koopaBall"),find("rk_koopaBallS")};
     std::snprintf(m.summary,sizeof m.summary,"course fx %s: %u archives (%u refused), %u emitters, %u textures (%u missing)",folder.c_str(),
                   unsigned(keys.size()),refused,unsigned(effects.system().resources.size()-m.baseEmitters),m.textureCount,missing);
     return !refused&&!missing;
@@ -334,7 +345,7 @@ void CourseEffects::unload(Texture* textures){
 // Every object this file emits for, read from the scene's ObjectDirector. Runs on the first
 // step after RaceEffects::reset (each race start), which also retired every handle.
 void CourseEffects::Impl::rebuild(){
-    objects.clear();kartPosValid=false;cannonStart=false;
+    objects.clear();cannonStart=false;
     const auto* director=K::Field::ObjectDirector::Instance();
     if(!director)return;
     const auto& flow=director->flowTable();
@@ -349,7 +360,12 @@ void CourseEffects::Impl::rebuild(){
         if(obj->id()==ObjectId::FlamePoleV||obj->id()==ObjectId::FlamePoleVBig)t.kind=Kind::Pole;
         else if(obj->id()==ObjectId::KoopaFigure64)t.kind=Kind::Statue;
         else if(obj->id()==ObjectId::Propeller)t.kind=Kind::Propeller;
-        else if(obj->id()==ObjectId::VolcanoBall){
+        // W_Woodbox's spawner has no collision (0x8077ECD0); its crates do.
+        else if(obj->id()==ObjectId::Woodbox||(obj->id()==ObjectId::W_Woodbox&&static_cast<const K::Field::ObjectCollidable*>(obj)->collision())){
+            t.kind=Kind::Crate;t.count=static_cast<const K::Field::ObjectWoodbox*>(obj)->breakCount();
+        }else if(obj->id()==ObjectId::KoopaFigure){
+            t.kind=Kind::Figure;t.count=static_cast<const K::Field::ObjectKoopaFigure*>(obj)->vomitCount();
+        }else if(obj->id()==ObjectId::VolcanoBall){
             bool found=false;
             for(auto& l:launchers)if(l.first==geo){l.second=obj;found=true;}
             if(!found)launchers.push_back({geo,obj});
@@ -384,7 +400,7 @@ void CourseEffects::Impl::rebuild(){
         }
 }
 
-void CourseEffects::Impl::stepObject(ef::System& s,Tracked& t,uint32_t timer,unsigned screens,bool timeTrial,unsigned players){
+void CourseEffects::Impl::stepObject(ef::System& s,Tracked& t,uint32_t timer,unsigned screens){
     // vtable +0x30 (0x8067DA54) is the clip entry: an effect is culled once the object is
     // outside every screen and no screen shows the look-behind view (0x8067DCC0).
     const bool culled=t.clip.valid&&t.clip.culled&&!lookBack;
@@ -410,26 +426,12 @@ void CourseEffects::Impl::stepObject(ef::System& s,Tracked& t,uint32_t timer,uns
         const auto& o=*static_cast<const K::Field::ObjectKoopaFigure64*>(t.object);
         const bool big=t.geo->setting(1)==1;
         if(timer<uint32_t(t.geo->setting(2)))break;
-        bool on=false,off=false;
-        if(big||timeTrial){
-            // Retail's timed cycle (ObjectDirector +0x55, time trials and ghost races) is
-            // Kinoko's (0x806DAB5C): a new cycle on frame 480. From its frame after calc:
-            // 1 is the step that restarted it (neither branch), 2-300 burn, 301-480 fade.
-            // The big statue's burn hit is Kinoko's, so its fire follows Kinoko in every mode.
-            const uint32_t f=o.cycleFrame();
-            on=f>=2&&f<=300;off=f>=301;
-        }else{
-            // Offline GP and VS: a cycle starts when the kart picked by timer % players
-            // stands within setting 0 (x/z) of a resting statue; the kart's position is the
-            // previous step's, as the object calc runs before the karts.
-            const int16_t reach=int16_t(t.geo->setting(0));
-            const Vec3 k=kartPos[players?(timer%players)&0xff:0],p=vec(o.pos());
-            const float dx=p.x-k.x,dz=p.z-k.z;
-            const bool trigger=kartPosValid&&dx*dx+dz*dz<=float(int(reach)*int(reach))&&t.frame==480;
-            on=t.frame<300;off=t.frame>=300&&!trigger;
-            if(trigger)t.frame=0;
-            if(t.frame<480)++t.frame;
-        }
+        // Kinoko's cycle (0x806DAB5C) in every mode: a resting statue (frame 480) restarts on
+        // the timer in time trials and ghost races, else by kart proximity. From its frame
+        // after calc: 1 is the step that restarted it (neither branch), 2-300 burn, 301-480
+        // fade (480 also while it rests).
+        const uint32_t f=o.cycleFrame();
+        const bool on=f>=2&&f<=300,off=f>=301;
         const int spec=big?ids.koopaFireL:ids.koopaFire;
         if(on){if(!culled)create(s,t.fx[0],spec);}
         else if(off)fade(s,t.fx[0]);
@@ -498,6 +500,29 @@ void CourseEffects::Impl::stepObject(ef::System& s,Tracked& t,uint32_t timer,uns
         }
         break;
     }
+    case Kind::Crate:{
+        // Breakable 0x8076EFDC, on each break (vf+0x100): unless culled, rk_woodbox (one
+        // handle, created unless still running) at the box, scaled per axis by its scale.
+        const auto& o=*static_cast<const K::Field::ObjectWoodbox*>(t.object);
+        if(o.breakCount()==t.count)break;
+        t.count=o.breakCount();
+        if(culled)break;
+        const Vec3 p=vec(o.breakPos()),k=vec(o.scale());
+        create(s,t.fx[0],ids.woodbox);
+        move(s,t.fx[0],{{{k.x,0,0,p.x},{0,k.y,0,p.y},{0,0,k.z,p.z}}});
+        break;
+    }
+    case Kind::Figure:{
+        // Calc 0x8077213C, as the mouth opens: unless culled, rk_koopaBallS on one screen
+        // (else rk_koopaBall, ctor 0x80771FB0) on the statue's matrix.
+        const auto& o=*static_cast<const K::Field::ObjectKoopaFigure*>(t.object);
+        if(o.vomitCount()==t.count)break;
+        t.count=o.vomitCount();
+        if(culled)break;
+        create(s,t.fx[0],screens<=1?ids.koopaBallS:ids.koopaBall);
+        move(s,t.fx[0],at(o.transform(),vec(o.pos()),1));
+        break;
+    }
     }
 }
 
@@ -511,21 +536,16 @@ void CourseEffects::step(RaceEffects& effects){
     if(!race||!config||!karts)return;
     const uint32_t timer=race->timer();
     const auto& scenario=config->raceScenario();
-    const unsigned players=std::min<unsigned>(scenario.playerCount,unsigned(m.kartPos.size()));
+    const unsigned players=std::min<unsigned>(scenario.playerCount,12u);
     // Retail picks its variants by local screen count (RaceConfig +0x25). One screen here;
     // Old 3DS (reduced quality) takes the counts retail's split screen uses, as the kart
     // effect LOD does (render_quality.hpp kartEffectScreens).
     const unsigned screens=renderQuality().kartEffectScreens;
     auto& s=effects.system();
-    for(auto& t:m.objects)m.stepObject(s,t,timer,screens,scenario.isTimeTrial(),players);
+    for(auto& t:m.objects)m.stepObject(s,t,timer,screens);
     // What the next step's object calc reads of the karts.
     m.cannonStart=false;
-    for(unsigned i=0;i<players;++i){
-        const auto* kart=karts->object(i);
-        m.kartPos[i]=vec(kart->pos());
-        m.cannonStart|=kart->status().onBit(K::Kart::eStatus::CannonStart);
-    }
-    m.kartPosValid=true;
+    for(unsigned i=0;i<players;++i)m.cannonStart|=karts->object(i)->status().onBit(K::Kart::eStatus::CannonStart);
 }
 
 void CourseEffects::clip(const EffectClipCamera& camera,bool lookBack){

@@ -153,8 +153,9 @@ Please test changes on an emulator (Azahar) or real hardware before submitting.
 - **dudewhat**: the original Mario Kart Wii 3DS port and CIA builder this project continues
 - **MiniBandit**: this continuation
 - **ThePhilosophicalOne**: this fork's retail-accuracy pass
-- **Epic0522**: graphics upgrades: lighting, kart shadows, water, effects and menu highlights
+- **Epic0522**: graphics upgrades: lighting, kart shadows, water, effects and menu highlights; upstream's race overhaul was the guide for this fork's crates, Wiggler, item boxes on moving roads and Bowser statues
 - **DarthMDev**: Old 3DS drawing performance fix
+- **Codiak540**: Old 3DS performance testing (course-object detail distance, particle limit)
 - [Kinoko](https://github.com/vabold/Kinoko) by vabold (MIT): Mario Kart Wii physics
 - [noclip.website](https://github.com/magcius/noclip.website) (MIT): BRRES model reading
 - [gclib](https://github.com/LagoLunatic/gclib) by LagoLunatic (MIT): disc and texture tools

@@ -290,10 +290,6 @@ void CourseObjects::Impl::link(){
         v.placement=placementMatrix(*geo);
         if(classifyObject(v,assets,course))visuals.push_back(v);
     }
-    // Bowser's statue opens its mouth as its fireball launches.
-    const K::Field::ObjectBase* fireball=nullptr;
-    for(const auto& v:visuals)if(!std::strcmp(v.name,"koopaBall"))fireball=v.object;
-    for(auto& v:visuals)if(!std::strcmp(v.name,"koopaFigure"))v.partner=fireball;
 }
 void CourseObjects::Impl::begin(const Renderer& renderer,unsigned frameTick,Vec3 frameCamera){
     // Linking reads and rebuilds visuals: always on this thread, before recording.

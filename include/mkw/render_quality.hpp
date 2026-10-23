@@ -48,8 +48,10 @@ struct RenderQuality {
     void setReduced(bool on){
         *this=RenderQuality{};
         if(!on)return;
-        reduced=true;minScreenRatio=.015f;objectLowDistance=4000.f;
-        shadowVolumes=false;bloomBlurRounds=1;boxSparkleRatio=.04f;particleBudget=96;kartEffectScreens=2;animationStep=4;vramCourseTextures=true;
+        // Old 3DS course-object detail distance and particle limit: lowered from
+        // 4000 and 96 following Codiak540's Old 3DS tests (upstream 9e0da8b).
+        reduced=true;minScreenRatio=.015f;objectLowDistance=1500.f;
+        shadowVolumes=false;bloomBlurRounds=1;boxSparkleRatio=.04f;particleBudget=48;kartEffectScreens=2;animationStep=4;vramCourseTextures=true;
     }
 #ifdef MKW_RENDER_QUALITY_C3D
     // True when bounds b placed by transform t are too small to draw from camera.

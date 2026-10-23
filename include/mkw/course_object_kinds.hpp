@@ -77,8 +77,6 @@ struct Visual {
     // Every Kinoko object built from this placement, in registration order:
     // spawned parts first, the placement's own object last.
     std::vector<const Kinoko::Field::ObjectBase*> parts;
-    // Another placement's object this presentation follows (statue -> fireball).
-    const Kinoko::Field::ObjectBase* partner=nullptr;
     char name[32]{},resources[64]{},resource[64]{};
     C3D_Mtx placement{};
     ObjectPresenter present=nullptr;

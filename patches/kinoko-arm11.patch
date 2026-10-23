@@ -76,6 +76,73 @@ index f0c4cc4..8424fae 100644
  }
  
  // sin/cos struct
+diff --git a/source/game/field/CollisionDirector.cc b/source/game/field/CollisionDirector.cc
+index a2d2abf..e99246a 100644
+--- a/source/game/field/CollisionDirector.cc
++++ b/source/game/field/CollisionDirector.cc
+@@ -11,6 +11,48 @@ void CollisionDirector::checkCourseColNarrScLocal(f32 radius, const EGG::Vector3
+     ObjectDrivableDirector::Instance()->colNarScLocal(radius, pos, mask, timeOffset);
+ }
+ 
++/// @addr{0x8078F140}
++/// @brief As checkSpherePartialPush, with the non-push course and drivable queries.
++bool CollisionDirector::checkSpherePartial(f32 radius, const EGG::Vector3f &pos,
++        const EGG::Vector3f &prevPos, KCLTypeMask flags, CollisionInfoPartial *info,
++        KCLTypeMask *typeMaskOut, u32 timeOffset) {
++    if (info) {
++        info->bbox.setZero();
++    }
++
++    if (typeMaskOut) {
++        *typeMaskOut = KCL_NONE;
++    }
++
++    auto *courseColMgr = CourseColMgr::Instance();
++    auto *noBounceInfo = courseColMgr->noBounceWallInfo();
++    if (noBounceInfo) {
++        noBounceInfo->bbox.setZero();
++        noBounceInfo->dist = std::numeric_limits<f32>::min();
++    }
++
++    bool colliding = flags &&
++            courseColMgr->checkSpherePartial(1.0f, radius, nullptr, pos, prevPos, flags, info,
++                    typeMaskOut);
++
++    colliding |= ObjectDrivableDirector::Instance()->checkSpherePartial(radius, pos, prevPos,
++            flags, info, typeMaskOut, timeOffset);
++
++    if (colliding) {
++        if (info) {
++            info->tangentOff = info->bbox.min + info->bbox.max;
++        }
++
++        if (noBounceInfo) {
++            noBounceInfo->tangentOff = noBounceInfo->bbox.min + noBounceInfo->bbox.max;
++        }
++    }
++
++    courseColMgr->clearNoBounceWallInfo();
++
++    return colliding;
++}
++
+ /// @addr{0x8078F320}
+ bool CollisionDirector::checkSpherePartialPush(f32 radius, const EGG::Vector3f &pos,
+         const EGG::Vector3f &prevPos, KCLTypeMask flags, CollisionInfoPartial *info,
+diff --git a/source/game/field/CollisionDirector.hh b/source/game/field/CollisionDirector.hh
+index f48aa6c..0961309 100644
+--- a/source/game/field/CollisionDirector.hh
++++ b/source/game/field/CollisionDirector.hh
+@@ -60,6 +60,9 @@ public:
+     void checkCourseColNarrScLocal(f32 radius, const EGG::Vector3f &pos, KCLTypeMask mask,
+             u32 timeOffset);
+ 
++    [[nodiscard]] bool checkSpherePartial(f32 radius, const EGG::Vector3f &pos,
++            const EGG::Vector3f &prevPos, KCLTypeMask flags, CollisionInfoPartial *info,
++            KCLTypeMask *typeMaskOut, u32 timeOffset);
+     [[nodiscard]] bool checkSpherePartialPush(f32 radius, const EGG::Vector3f &pos,
+             const EGG::Vector3f &prevPos, KCLTypeMask flags, CollisionInfoPartial *info,
+             KCLTypeMask *typeMaskOut, u32 timeOffset);
 diff --git a/source/game/field/KColData.hh b/source/game/field/KColData.hh
 index dce4f79..bc2ce83 100644
 --- a/source/game/field/KColData.hh
@@ -128,21 +195,18 @@ index f35456b..a66f16f 100644
      ObjectCollisionConvexHull *m_hull;
      Kart::KartObject *m_kartObject;
 diff --git a/source/game/field/ObjectDirector.cc b/source/game/field/ObjectDirector.cc
-index edcbbda..249dcb8 100644
+index edcbbda..6d46992 100644
 --- a/source/game/field/ObjectDirector.cc
 +++ b/source/game/field/ObjectDirector.cc
-@@ -2,8 +2,10 @@
+@@ -2,6 +2,7 @@
  
  #include "game/field/BoxColManager.hh"
  #include "game/field/ObjectDrivableDirector.hh"
 +#include "game/field/ObjectCollisionSphere.hh"
  #include "game/field/obj/ObjectRegistry.hh"
  
-+#include "game/kart/KartMove.hh"
  #include "game/kart/KartObject.hh"
- 
- #include "game/system/CourseMap.hh"
-@@ -65,11 +67,72 @@ void ObjectDirector::addManagedObject(ObjectCollidable *obj) {
+@@ -65,11 +66,72 @@ void ObjectDirector::addManagedObject(ObjectCollidable *obj) {
  }
  
  /// @addr{0x8082AB04}
@@ -215,7 +279,7 @@ index edcbbda..249dcb8 100644
          auto *objCollision = obj->collision();
          if (!objCollision) {
              continue;
-@@ -80,11 +143,12 @@ size_t ObjectDirector::checkKartObjectCollision(Kart::KartObject *kartObj,
+@@ -80,11 +142,12 @@ size_t ObjectDirector::checkKartObjectCollision(Kart::KartObject *kartObj,
              continue;
          }
  
@@ -232,19 +296,14 @@ index edcbbda..249dcb8 100644
  
          // The object might change the reaction states
          obj->processKartReactions(kartObj, reactionOnKart, reactionOnObj);
-@@ -92,11 +156,17 @@ size_t ObjectDirector::checkKartObjectCollision(Kart::KartObject *kartObj,
-         Kart::Reaction reaction =
+@@ -93,10 +156,13 @@ size_t ObjectDirector::checkKartObjectCollision(Kart::KartObject *kartObj,
                  obj->onCollision(kartObj, reactionOnKart, reactionOnObj, m_hitDepths[count]);
          m_reactions[count] = reaction;
--
+ 
 -        if (reaction == Kart::Reaction::WallAllSpeed || reaction == Kart::Reaction::WallSpark) {
 -            obj->onWallCollision(kartObj, m_hitDepths[count]);
 -        } else {
 -            obj->onObjectCollision(kartObj);
-+        // Port, audio only: the contact as onCollision saw it (no state or reaction changes).
-+        kartObj->move()->cueObjectReaction(static_cast<const ObjectBase *>(obj),
-+                static_cast<s32>(reactionOnObj));
-+
 +        // Retail calls the contact callbacks only outside an action (status bit 32).
 +        if (kartObj->status().offBit(Kart::eStatus::InAction)) {
 +            if (reaction == Kart::Reaction::WallAllSpeed || reaction == Kart::Reaction::WallSpark) {
@@ -255,7 +314,7 @@ index edcbbda..249dcb8 100644
          }
  
          m_collidingObjects[count] = obj;
-@@ -147,7 +217,8 @@ void ObjectDirector::DestroyInstance() {
+@@ -147,7 +213,8 @@ void ObjectDirector::DestroyInstance() {
  /// @addr{0x8082A38C}
  ObjectDirector::ObjectDirector()
      : m_flowTable("ObjFlow.bin"), m_hitTableKart("GeoHitTableKart.bin"),
@@ -265,7 +324,7 @@ index edcbbda..249dcb8 100644
        m_calcObjects(MAX_UNIT_COUNT), m_collisionObjects(MAX_UNIT_COUNT), m_psea(nullptr),
        m_managedObjects(MAX_MANAGED_OBJECTS) {}
  
-@@ -173,6 +244,10 @@ void ObjectDirector::createObjects() {
+@@ -173,6 +240,10 @@ void ObjectDirector::createObjects() {
      bool rGV2 = course == Course::SNES_Ghost_Valley_2;
      bool sun = false;
  
@@ -276,7 +335,7 @@ index edcbbda..249dcb8 100644
      // The max pitch of the Chain Chomp only needs to be set once,
      // so we set it here instead of in the Chain Chomp constructor.
      s_wanwanMaxPitch = course == Course::GCN_Mario_Circuit ? -20.0f : -30.0f;
-@@ -191,6 +266,11 @@ void ObjectDirector::createObjects() {
+@@ -191,6 +262,11 @@ void ObjectDirector::createObjects() {
              continue;
          }
  
@@ -288,7 +347,7 @@ index edcbbda..249dcb8 100644
          // rGV2's blocks are created outside of the factory function
          if (rGV2) {
              switch (static_cast<ObjectId>(pObj->id())) {
-@@ -254,6 +334,8 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
+@@ -254,9 +330,13 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
          return EGG::egg_new<ObjectHeyhoShip>(params);
      case ObjectId::KartTruck:
      case ObjectId::CarBody:
@@ -297,7 +356,12 @@ index edcbbda..249dcb8 100644
          return EGG::egg_new<ObjectCarTGE>(params);
      case ObjectId::KoopaBall:
          return EGG::egg_new<ObjectKoopaBall>(params);
-@@ -375,6 +457,11 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
++    case ObjectId::KoopaFigure:
++        return EGG::egg_new<ObjectKoopaFigure>(params);
+     case ObjectId::W_Woodbox:
+         return EGG::egg_new<ObjectWoodboxW>(params);
+     case ObjectId::SunDS:
+@@ -375,6 +455,11 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
          return EGG::egg_new<ObjectEscalator>(params);
      case ObjectId::EscalatorGroup:
          return EGG::egg_new<ObjectEscalatorGroup>(params);
@@ -309,7 +373,7 @@ index edcbbda..249dcb8 100644
  
      // Non-specified objects are stock collidable objects by default
      // However, we need to specify an impl, so we don't use default
-@@ -396,6 +483,10 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
+@@ -396,6 +481,10 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
      case ObjectId::WLDokanGC:
      case ObjectId::Mdush:
          return EGG::egg_new<ObjectKCL>(params);
@@ -557,11 +621,43 @@ index e715fa3..9b631c8 100644
  protected:
      StateManager(void *obj, const std::span<const StateManagerEntry> &entries)
          : m_currentStateId(0), m_nextStateId(-1), m_currentFrame(0), m_entries(entries),
+diff --git a/source/game/field/obj/ObjectAurora.cc b/source/game/field/obj/ObjectAurora.cc
+index d61f9c0..ae6897a 100644
+--- a/source/game/field/obj/ObjectAurora.cc
++++ b/source/game/field/obj/ObjectAurora.cc
+@@ -31,6 +31,27 @@ f32 ObjectAurora::getCollisionRadius() const {
+     return COLLISION_SIZE.z + 100.0f;
+ }
+ 
++/// @addr{0x807FB39C}
++/// @brief Ride slot +0x118: the rider keeps its x/z offset; its height is the road's wave at
++/// the offset's z (calcCollision's) at RaceManager +0x20, which the caller passes; up is ey.
++void ObjectAurora::calcRidePos(const EGG::Vector3f &offset, u32 timer, EGG::Vector3f &pos,
++        EGG::Vector3f &up) const {
++    f32 t = static_cast<f32>(static_cast<s32>(timer));
++    f32 minsNormalized = (t / 60.0f - 30.0f) / 60.0f;
++    f32 frequency = 1.0f + minsNormalized * minsNormalized;
++    if (frequency >= 4.0f) {
++        frequency = 4.0f;
++    }
++
++    f32 period = (F_PI * (2.0f * offset.z)) / COLLISION_SIZE.z;
++    f32 wave = EGG::Mathf::SinFIdx(RAD2FIDX * (period * frequency + (F_PI * t) / 50.0f));
++
++    pos.x = offset.x + this->pos().x;
++    pos.y = (period * 80.0f) * wave + this->pos().y;
++    pos.z = offset.z + this->pos().z;
++    up = EGG::Vector3f::ey;
++}
++
+ /// @addr{0x807FB59C}
+ bool ObjectAurora::checkPointPartial(const EGG::Vector3f &v0, const EGG::Vector3f &v1,
+         KCLTypeMask flags, CollisionInfoPartial *pInfo, KCLTypeMask *pFlagsOut) {
 diff --git a/source/game/field/obj/ObjectAurora.hh b/source/game/field/obj/ObjectAurora.hh
-index c206aac..9b2035a 100644
+index c206aac..70a66e6 100644
 --- a/source/game/field/obj/ObjectAurora.hh
 +++ b/source/game/field/obj/ObjectAurora.hh
-@@ -13,6 +13,11 @@ public:
+@@ -13,8 +13,22 @@ public:
      [[nodiscard]] u32 loadFlags() const override;
      void createCollision() override;
      void calcCollisionTransform() override;
@@ -572,7 +668,18 @@ index c206aac..9b2035a 100644
 +    }
      f32 getCollisionRadius() const override;
  
++    /// @addr{0x807FB33C}
++    /// @brief Ride slot +0x110: an s_itembox resting on the road keeps its offset from it.
++    [[nodiscard]] EGG::Vector3f calcRideOffset(const EGG::Vector3f &pos) const {
++        return pos - this->pos();
++    }
++
++    void calcRidePos(const EGG::Vector3f &offset, u32 timer, EGG::Vector3f &pos,
++            EGG::Vector3f &up) const;
++
      [[nodiscard]] bool checkPointPartial(const EGG::Vector3f &v0, const EGG::Vector3f &v1,
+             KCLTypeMask flags, CollisionInfoPartial *pInfo, KCLTypeMask *pFlagsOut) override;
+     [[nodiscard]] bool checkPointPartialPush(const EGG::Vector3f &v0, const EGG::Vector3f &v1,
 diff --git a/source/game/field/obj/ObjectBasabasa.cc b/source/game/field/obj/ObjectBasabasa.cc
 index bec54f4..461dc6d 100644
 --- a/source/game/field/obj/ObjectBasabasa.cc
@@ -773,21 +880,39 @@ index fe20a13..ec11cd5 100644
      [[nodiscard]] f32 calcDirSwitchVelocity(u32 t) const;
  
 diff --git a/source/game/field/obj/ObjectBreakable.hh b/source/game/field/obj/ObjectBreakable.hh
-index 456eb59..f6cd62a 100644
+index 456eb59..5e1e9a5 100644
 --- a/source/game/field/obj/ObjectBreakable.hh
 +++ b/source/game/field/obj/ObjectBreakable.hh
-@@ -28,6 +28,11 @@ public:
-         m_state = 1;
+@@ -23,9 +23,29 @@ public:
+         return reactionOnKart;
      }
  
-+    /// Presentation only: retail +0xB0. 0 is hidden (retail hides the model), 1 and 2 show it.
++    /// @addr{0x8076EC68}
++    /// @brief The effect handle (vf+0xec), the kart-hit sound id and the rumble flag +0xbc
++    /// are presentation; what remains is the virtual enableCollision (vf+0xf0).
++    void init() override {
++        enableCollision();
++    }
++
+     /// @addr{0x8076ED70}
++    /// @brief State 1, the box tangible again (vf+0x94) and the model shown (vf+0x68).
+     virtual void enableCollision() {
+         m_state = 1;
++        ObjectBase::enableCollision();
++    }
++
++    /// Presentation only: retail +0xB0. 0 hidden, 1 shown, 2 broken (hidden by the item drop
++    /// 0x8076EDE4), 3 shown while it falls back in (Woodbox 0x8077E750).
 +    [[nodiscard]] u32 state() const {
 +        return m_state;
 +    }
 +
++    /// Presentation only: whether retail's setVisible calls leave the model shown.
++    [[nodiscard]] bool shown() const {
++        return m_state == 1 || m_state == 3;
+     }
+ 
  protected:
-     u32 m_state;
- };
 diff --git a/source/game/field/obj/ObjectBulldozer.cc b/source/game/field/obj/ObjectBulldozer.cc
 index f592e7f..4d8ae43 100644
 --- a/source/game/field/obj/ObjectBulldozer.cc
@@ -1993,10 +2118,188 @@ index d447748..f025476 100644
  
      void calcErupted();
 diff --git a/source/game/field/obj/ObjectHanachan.cc b/source/game/field/obj/ObjectHanachan.cc
-index 15870f0..0538007 100644
+index 15870f0..600c924 100644
 --- a/source/game/field/obj/ObjectHanachan.cc
 +++ b/source/game/field/obj/ObjectHanachan.cc
-@@ -186,6 +186,11 @@ void ObjectHanachan::calcWalk() {
+@@ -1,9 +1,22 @@
+ #include "ObjectHanachan.hh"
+ 
++#include "game/field/CollisionDirector.hh"
+ #include "game/field/ObjectDirector.hh"
+ 
++#include "game/kart/KartObject.hh"
++#include "game/kart/KartParam.hh"
++
++#include "game/system/RaceConfig.hh"
++
+ namespace Kinoko::Field {
+ 
++namespace {
++
++constexpr f32 HOP_VEL = 70.0f;  ///< 0x808C4310
++constexpr f32 HOP_GRAVITY = 3.0f; ///< 0x808C4314
++
++} // namespace
++
+ /// @addr{0x806F2FE8}
+ HanachanChainManager::HanachanChainManager(const std::span<const f32> &linkDistances) {
+     size_t count = linkDistances.size() + 1;
+@@ -54,6 +67,144 @@ void HanachanChainManager::calc() {
+     }
+ }
+ 
++/// @addr{0x806C6C10}
++/// @brief The head's calc (0x806C82AC) starts the same way; the rest of both is drawing.
++void ObjectHanachanPart::calc() {
++    constexpr u32 WOBBLE_FRAME_MAX = 60;
++
++    m_hopEnded = false;
++
++    if (m_hopFrame != -1) {
++        calcHop();
++    }
++
++    if (m_wobbleFrame <= WOBBLE_FRAME_MAX) {
++        ++m_wobbleFrame;
++    }
++}
++
++/// @addr{0x806C6C94}
++/// @brief Object reaction 3 or 5 (a Star, Mega or Bullet kart, GeoHitTableKartObj row 0xe2)
++/// starts the damage hop; any other contact flags the part for the Wiggler's voice and
++/// shake, from a non-ghost kart or in a time trial replay. A running wave ignores contacts.
++/// Retail also rumbles a local human's controller on a hop (fn_1_800C4); the reaction on the
++/// kart only changes with the flags +0xe0 / +0xe1, which only BossHanachan sets.
++Kart::Reaction ObjectHanachanPart::onCollision(Kart::KartObject *kartObj,
++        Kart::Reaction reactionOnKart, Kart::Reaction reactionOnObj, EGG::Vector3f & /*hitDepth*/) {
++    if (m_waveLocked) {
++        return reactionOnKart;
++    }
++
++    const s32 reaction = static_cast<s32>(reactionOnObj);
++    if (reaction == 3 || reaction == 5) {
++        if (m_hopFrame == -1) {
++            startHop();
++        }
++    } else {
++        // isGhost / RaceConfig::isTimeAttackReplay: Kinoko replays a time trial with the ghost
++        // as player 0.
++        const auto &scenario = System::RaceConfig::Instance()->raceScenario();
++        if (scenario.players[kartObj->param()->playerIdx()].type !=
++                        System::RaceConfig::Player::Type::Ghost ||
++                scenario.players[0].type == System::RaceConfig::Player::Type::Ghost) {
++            m_contactPending = true;
++        }
++    }
++
++    return reactionOnKart;
++}
++
++/// @brief Port: the item callback (0x806C6E40) ignores a Bob-omb (item object 9); a global
++/// hit (no item) is never one.
++void ObjectHanachanPart::processItemReactions(s16 type, bool direct, s16 &reactionOnItem,
++        s16 &reactionOnObj) {
++    ObjectCollidable::processItemReactions(type, direct, reactionOnItem, reactionOnObj);
++    m_bombItem = !direct && type == 9;
++}
++
++/// @addr{0x806C6E40}
++/// @brief Object reaction 3 to 6 starts the damage hop, anything else flags the part as a
++/// kart contact does (GeoHitTableItemObj row 0xe2 is all 0, so items only flag it).
++s16 ObjectHanachanPart::onItemCollision(const EGG::Vector3f & /*position*/,
++        const EGG::Vector3f & /*velocity*/, s16 reactionOnItem, s16 reactionOnObj,
++        EGG::Vector3f & /*hitDepth*/) {
++    if (m_waveLocked || m_bombItem) {
++        return reactionOnItem;
++    }
++
++    if (reactionOnObj >= 3 && reactionOnObj <= 6) {
++        if (m_hopFrame == -1) {
++            startHop();
++        }
++    } else {
++        m_contactPending = true;
++    }
++
++    return reactionOnItem;
++}
++
++/// @brief The global item hit (PAL 0x8082B294) calls the item callback with no item.
++void ObjectHanachanPart::onGlobalItemCollision(s16 reactionOnItem, s16 reactionOnObj) {
++    EGG::Vector3f hitDepth = EGG::Vector3f::zero;
++    onItemCollision(pos(), EGG::Vector3f::zero, reactionOnItem, reactionOnObj, hitDepth);
++}
++
++/// @addr{0x806C723C}
++/// @brief The hop makes the part intangible until it lands again. Retail also keeps the start
++/// height (+0xcc), which only the boss reads.
++void ObjectHanachanPart::startHop() {
++    disableCollision();
++    m_hopFrame = 0;
++    m_landingFrame = static_cast<u32>(2.0f * HOP_VEL / HOP_GRAVITY);
++    m_landed = false;
++}
++
++/// @addr{0x806C72B8}
++/// @brief A parabola from the part's position; after the first floor contact (past frame 5) a
++/// half-speed rebound, and the second contact (5 frames after the first) ends the hop.
++void ObjectHanachanPart::calcHop() {
++    constexpr f32 REBOUND_FACTOR = 0.5f; ///< 0x8089FA40
++    constexpr f32 RADIUS = 10.0f;        ///< 0x8089FA44
++    constexpr KCLTypeMask MASK = KCLTypeMask(0x64EBDFFF);
++    constexpr s32 LANDING_DELAY = 5;
++
++    ++m_hopFrame;
++
++    f32 height = m_landed ? CalcParabolicDisplacement(REBOUND_FACTOR * HOP_VEL, HOP_GRAVITY,
++                                    static_cast<u32>(m_hopFrame) - m_landingFrame) :
++                            CalcParabolicDisplacement(HOP_VEL, HOP_GRAVITY,
++                                    static_cast<u32>(m_hopFrame));
++
++    const EGG::Vector3f probe = pos() + EGG::Vector3f(0.0f, height, 0.0f);
++    auto *colDir = CollisionDirector::Instance();
++
++    CollisionInfo info;
++    bool hit = colDir->checkSphereFull(RADIUS, probe, EGG::Vector3f::inf, MASK, &info, nullptr, 0);
++
++    if (hit && m_hopFrame > LANDING_DELAY && !m_landed) {
++        m_landed = true;
++        height = 0.0f;
++        m_landingFrame = static_cast<u32>(m_hopFrame);
++
++        // Retail also skips this while the part is culled on every screen, and plays the
++        // rk_hanaSmk dust at skl_root (not ported).
++        if (!skipsLandingEffect()) {
++            cueSound(0x26c, SoundCall::StartNew); // SE_CC_HANACHAN_WALK_SHAKE
++        }
++    } else if (colDir->checkSpherePartial(RADIUS, probe, EGG::Vector3f::inf, MASK, nullptr,
++                       nullptr, 0) &&
++            static_cast<u32>(m_hopFrame) > m_landingFrame + LANDING_DELAY && m_landed) {
++        m_hopFrame = -1;
++        enableCollision();
++        m_hitOffset = EGG::Vector3f::zero;
++        m_hopEnded = true;
++        m_landed = false;
++        return;
++    }
++
++    m_hitOffset = EGG::Vector3f(0.0f, height, 0.0f);
++}
++
+ /// @addr{0x806C7D74}
+ ObjectHanachanHead::ObjectHanachanHead(const char *name, const EGG::Vector3f &pos,
+         const EGG::Vector3f &rot, const EGG::Vector3f &scale)
+@@ -158,6 +309,9 @@ void ObjectHanachan::init() {
+     m_right = EGG::Vector3f::ez;
+     m_railAlignment = RailAlignment::Unknown;
+     m_prevRailAlignment = RailAlignment::Unknown;
++    m_damageWaveFrame = -1;
++    m_damageOrigin = 0;
++    m_damageLast = 0;
+ 
+     reinterpret_cast<ObjectHanachanBody *>(m_parts.back())->m_lastSegment = true;
+ 
+@@ -186,6 +340,11 @@ void ObjectHanachan::calcWalk() {
      calcRailAlignmentMotion();
      m_chain.calc();
  
@@ -2008,11 +2311,176 @@ index 15870f0..0538007 100644
      m_stillAngVel = 15.0f;
  }
  
+@@ -331,4 +490,98 @@ ObjectHanachan::RailAlignment ObjectHanachan::calcRailAlignment() const {
+                                          RailAlignment::MisalignedRight;
+ }
+ 
++/// @addr{0x806C9A0C}
++/// @brief The body part of calc (fn_1_1B94AC) after calcBody: each body part not hopping
++/// voices a flagged contact (SE_CC_HANACHAN_V_COL from the head) and shakes sideways for 60
++/// frames (amplitude 30, period 6, linear decay). The head's flag is never read.
++void ObjectHanachan::calcContacts() {
++    constexpr u32 WOBBLE_DURATION = 60;
++    constexpr f32 WOBBLE_DURATION_F = 60.0f; ///< 0x8089FA28
++    constexpr f32 WOBBLE_PERIOD = 6.0f;      ///< 0x808C4308
++    constexpr f32 WOBBLE_AMPLITUDE = 30.0f;  ///< 0x808C430C
++
++    for (auto *part : bodyParts()) {
++        if (part->m_hopFrame >= 0) {
++            continue;
++        }
++
++        if (part->m_contactPending) {
++            part->m_wobbleFrame = 0;
++            headPart()->cueSound(0x26e, SoundCall::Voice); // SE_CC_HANACHAN_V_COL
++        }
++
++        if (part->m_wobbleFrame < WOBBLE_DURATION) {
++            f32 frame = static_cast<f32>(part->m_wobbleFrame);
++            f32 decay = 1.0f - (1.0f / (WOBBLE_DURATION_F / WOBBLE_PERIOD)) * (frame / WOBBLE_PERIOD);
++            f32 wave = EGG::Mathf::SinFIdx(RAD2FIDX * ((F_TAU * frame) / WOBBLE_PERIOD));
++            f32 amount = decay * (WOBBLE_AMPLITUDE * wave);
++            part->calcTransform();
++            part->m_hitOffset = part->transform().base(0) * amount;
++        } else {
++            part->m_hitOffset = EGG::Vector3f::zero;
++        }
++
++        part->m_contactPending = false;
++    }
++}
++
++/// @addr{0x806CBBC4}
++/// @brief A part in its first hop frame with no wave running starts one (SE_CC_HANACHAN_V_DMG
++/// from the head): every 4 frames the next part on each side of it hops, every part ignores
++/// contacts, and the far end's landing ends it.
++void ObjectHanachan::calcDamageWave() {
++    constexpr s32 WAVE_STEP = 4; ///< 0x808C4368
++
++    const s32 count = static_cast<s32>(m_parts.size());
++
++    for (s32 i = 0; i < count && m_damageWaveFrame == -1; ++i) {
++        if (m_parts[i]->m_hopFrame != 1) {
++            continue;
++        }
++
++        m_damageWaveFrame = 0;
++        m_damageOrigin = static_cast<u8>(i);
++        m_damageLast = (count >> 1) < i ? 0 : static_cast<u8>(count - 1);
++        headPart()->cueSound(0x26f, SoundCall::Voice); // SE_CC_HANACHAN_V_DMG
++    }
++
++    if (m_damageWaveFrame == 0) {
++        for (auto *part : m_parts) {
++            part->m_waveLocked = true;
++        }
++    }
++
++    if (m_damageWaveFrame < 0) {
++        return;
++    }
++
++    if (m_damageWaveFrame % WAVE_STEP == 0) {
++        s32 dist = m_damageWaveFrame / WAVE_STEP;
++
++        s32 idx = static_cast<s32>(m_damageOrigin) - dist;
++        if (idx >= 0 && m_parts[idx]->m_hopFrame < 0) {
++            m_parts[idx]->startHop();
++        }
++
++        idx = static_cast<s32>(m_damageOrigin) + dist;
++        if (idx < count && m_parts[idx]->m_hopFrame < 0) {
++            m_parts[idx]->startHop();
++        }
++    }
++
++    if (m_parts[m_damageLast]->m_hopEnded) {
++        m_damageWaveFrame = -1;
++        m_damageOrigin = 0;
++        m_damageLast = 0;
++
++        for (auto *part : m_parts) {
++            part->m_waveLocked = false;
++        }
++    }
++
++    if (m_damageWaveFrame != -1) {
++        ++m_damageWaveFrame;
++    }
++}
++
+ } // namespace Kinoko::Field
 diff --git a/source/game/field/obj/ObjectHanachan.hh b/source/game/field/obj/ObjectHanachan.hh
-index fc9ac57..baefa51 100644
+index fc9ac57..9775f5b 100644
 --- a/source/game/field/obj/ObjectHanachan.hh
 +++ b/source/game/field/obj/ObjectHanachan.hh
-@@ -172,6 +172,15 @@ public:
+@@ -89,7 +89,43 @@ public:
+     /// @addr{0x806CCACC}
+     void loadRail() override {}
+ 
++    void calc() override;
++
++    Kart::Reaction onCollision(Kart::KartObject *kartObj, Kart::Reaction reactionOnKart,
++            Kart::Reaction reactionOnObj, EGG::Vector3f &hitDepth) override;
++    void processItemReactions(s16 type, bool direct, s16 &reactionOnItem,
++            s16 &reactionOnObj) override;
++    s16 onItemCollision(const EGG::Vector3f &position, const EGG::Vector3f &velocity,
++            s16 reactionOnItem, s16 reactionOnObj, EGG::Vector3f &hitDepth) override;
++    void onGlobalItemCollision(s16 reactionOnItem, s16 reactionOnObj) override;
++
++    /// @brief Retail +0xb8: the hop height or the contact shake. Presentation only: the model
++    /// is drawn at pos + this (vtable +0x6c, 0x806CCA14); the collision ignores it.
++    [[nodiscard]] const EGG::Vector3f &hitOffset() const {
++        return m_hitOffset;
++    }
++
++protected:
++    /// @brief Retail vtable +0xf8 (body 0x806CCB20, head 0x806CCBF0): set, the hop's first
++    /// landing plays no dust and no SE_CC_HANACHAN_WALK_SHAKE.
++    [[nodiscard]] virtual bool skipsLandingEffect() const {
++        return false;
++    }
++
+ private:
++    void startHop();
++    void calcHop();
++
++    bool m_contactPending = false; ///< +0xb0: a non-damage contact, voiced by the next calc
++    u32 m_wobbleFrame = 1000;      ///< +0xb4: frames since the last voiced contact
++    EGG::Vector3f m_hitOffset = EGG::Vector3f::zero; ///< +0xb8
++    s32 m_hopFrame = -1;           ///< +0xc4: -1 while not hopping
++    u32 m_landingFrame = 0;        ///< +0xc8
++    bool m_landed = false;         ///< +0xd0: the hop's first landing happened
++    bool m_hopEnded = false;       ///< +0xd1: the hop ended this frame
++    bool m_waveLocked = false;     ///< +0xd2: a damage wave runs; contacts are ignored
++    bool m_bombItem = false;       ///< Port: the item callback's item is a Bob-omb (type 9)
++
+     /// @addr{0x806CA5E4}
+     void calcTransformFromUpAndTangent(const EGG::Vector3f &pos, const EGG::Vector3f &up,
+             const EGG::Vector3f &tangent) {
+@@ -113,6 +149,12 @@ public:
+ 
+     void calcCollisionTransform() override;
+ 
++protected:
++    /// @addr{0x806CCBF0}
++    [[nodiscard]] bool skipsLandingEffect() const override {
++        return true;
++    }
++
+ private:
+     EGG::Vector3f m_lastPos;
+ };
+@@ -159,6 +201,8 @@ public:
+         calcRail();
+         StateManager::calc();
+         calcBody();
++        calcContacts();
++        calcDamageWave();
+     }
+ 
+     /// @addr{0x806CC9FC}
+@@ -172,6 +216,15 @@ public:
      /// @addr{0x806CC9F4}
      void createCollision() override {}
  
@@ -2028,6 +2496,25 @@ index fc9ac57..baefa51 100644
  private:
      enum class RailAlignment {
          Aligned = -1,
+@@ -195,6 +248,8 @@ private:
+     void initChain();
+     void clearChain();
+     void calcRailAlignmentMotion();
++    void calcContacts();
++    void calcDamageWave();
+ 
+     /// @addr{0x806CAC74}
+     void calcSlowMotion() {
+@@ -245,6 +300,9 @@ private:
+     EGG::Vector3f m_right;
+     RailAlignment m_railAlignment; ///< Captures when the wiggle takes sharp turns
+     RailAlignment m_prevRailAlignment;
++    s32 m_damageWaveFrame = -1; ///< +0x134: -1 while no damage wave runs
++    u8 m_damageOrigin = 0;      ///< +0x138: the part whose hop started the wave
++    u8 m_damageLast = 0;        ///< +0x139: the far end; its landing ends the wave
+ 
+     /// @brief The distance between each body part link in the chain
+     static constexpr std::array<f32, 6> BODY_PART_DISTANCES = {{
 diff --git a/source/game/field/obj/ObjectHeyho.cc b/source/game/field/obj/ObjectHeyho.cc
 index 3489928..ef1a9db 100644
 --- a/source/game/field/obj/ObjectHeyho.cc
@@ -2324,7 +2811,7 @@ index 14ee3e8..8ae4845 100644
      f32 m_targetY;
  
 diff --git a/source/game/field/obj/ObjectId.hh b/source/game/field/obj/ObjectId.hh
-index e2bc0b5..e2487a6 100644
+index e2bc0b5..dd07786 100644
 --- a/source/game/field/obj/ObjectId.hh
 +++ b/source/game/field/obj/ObjectId.hh
 @@ -23,9 +23,11 @@ enum class ObjectId {
@@ -2347,7 +2834,7 @@ index e2bc0b5..e2487a6 100644
      DokanSFC = 0x12e,
      CastleTree1c = 0x130,
      MarioTreeGCc = 0x134,
-@@ -45,15 +48,18 @@ enum class ObjectId {
+@@ -45,15 +48,19 @@ enum class ObjectId {
      Pylon = 0x144,
      PalmTree = 0x145,
      Parasol = 0x146,
@@ -2362,11 +2849,12 @@ index e2bc0b5..e2487a6 100644
      ParasolR = 0x16e,
      ObakeBlock2SFCc = 0x16f,
      ObakeBlock3SFCc = 0x170,
++    KoopaFigure = 0x171,
 +    StarRing = 0x17a,
      KoopaFigure64 = 0x18b,
      Kuribo = 0x191,
      Choropu = 0x192,
-@@ -92,6 +98,8 @@ enum class ObjectId {
+@@ -92,6 +99,8 @@ enum class ObjectId {
      Turibashi = 0x202,
      FlamePoleEff = 0x203,
      Aurora = 0x204,
@@ -2560,10 +3048,10 @@ index 6ff160b..06007ac 100644
 +
  } // namespace Kinoko::Field
 diff --git a/source/game/field/obj/ObjectKoopaBall.cc b/source/game/field/obj/ObjectKoopaBall.cc
-index f951dc1..38de8df 100644
+index f951dc1..7c3579e 100644
 --- a/source/game/field/obj/ObjectKoopaBall.cc
 +++ b/source/game/field/obj/ObjectKoopaBall.cc
-@@ -1,5 +1,7 @@
+@@ -1,9 +1,13 @@
  #include "ObjectKoopaBall.hh"
  
 +#include "game/kart/KartObject.hh"
@@ -2571,7 +3059,13 @@ index f951dc1..38de8df 100644
  #include "game/field/CollisionDirector.hh"
  
  #include "game/kart/KartCollide.hh"
-@@ -81,10 +83,17 @@ void ObjectKoopaBall::calc() {
+ 
++#include "game/system/RaceConfig.hh"
++
+ namespace Kinoko::Field {
+ 
+ /// @addr{0x80770384}
+@@ -81,10 +85,17 @@ void ObjectKoopaBall::calc() {
  }
  
  /// @addr{0x80771BF4}
@@ -2591,7 +3085,7 @@ index f951dc1..38de8df 100644
  }
  
  /// @addr{0x80770F4C}
-@@ -100,6 +109,7 @@ void ObjectKoopaBall::calcTangible() {
+@@ -100,6 +111,7 @@ void ObjectKoopaBall::calcTangible() {
          m_railInterpolator->setCurrVel(INITIAL_VELOCITY / INITIAL_ANGULAR_SPEED);
          break;
      case RailInterpolator::Status::ChangingDirection: {
@@ -2599,7 +3093,31 @@ index f951dc1..38de8df 100644
          m_state = State::Exploding;
          m_curScale = SCALE_INITIAL;
          setScale(SCALE_INITIAL);
-@@ -181,6 +191,10 @@ void ObjectKoopaBall::checkSphereFull() {
+@@ -152,8 +164,11 @@ void ObjectKoopaBall::calcExploding() {
+ }
+ 
+ /// @addr{0x80771248}
++/// @brief The next launch is 210 frames away in time trials and ghost races (ObjectDirector
++/// +0x55), else 270 (0x808CF3EC, 0x808CF3E8).
+ void ObjectKoopaBall::calcIntangible() {
+-    constexpr s32 COOLDOWN_FRAMES = 210;
++    constexpr s32 COOLDOWN_FRAMES_TT = 210;
++    constexpr s32 COOLDOWN_FRAMES = 270;
+ 
+     if (m_cooldownTimer >= 0) {
+         return;
+@@ -163,7 +178,9 @@ void ObjectKoopaBall::calcIntangible() {
+     m_railInterpolator->setCurrVel(INITIAL_VELOCITY);
+     m_angSpeed = INITIAL_ANGULAR_SPEED;
+     m_vel.y = INITIAL_Y_VEL;
+-    m_cooldownTimer = COOLDOWN_FRAMES;
++    m_cooldownTimer = System::RaceConfig::Instance()->raceScenario().isTimeTrial() ?
++            COOLDOWN_FRAMES_TT :
++            COOLDOWN_FRAMES;
+ }
+ 
+ /// @addr{0x80771624}
+@@ -181,6 +198,10 @@ void ObjectKoopaBall::checkSphereFull() {
          m_vel.y *= BOUNCE_FACTOR;
          m_angSpeed = std::max(MIN_ANG_SPEED, m_angSpeed);
          addPos(info.tangentOff);
@@ -2635,26 +3153,226 @@ index 9ff7961..ad95f27 100644
  private:
      enum class State {
          Tangible = 0,
+diff --git a/source/game/field/obj/ObjectKoopaFigure.cc b/source/game/field/obj/ObjectKoopaFigure.cc
+new file mode 100644
+index 0000000..6e44fb5
+--- /dev/null
++++ b/source/game/field/obj/ObjectKoopaFigure.cc
+@@ -0,0 +1,77 @@
++#include "ObjectKoopaFigure.hh"
++
++#include "game/system/RaceConfig.hh"
++
++namespace Kinoko::Field {
++
++/// @addr{0x80771FB0}
++/// @brief The ctor's effect handle (rk_koopaBallS on one screen, else rk_koopaBall) is
++/// presentation.
++ObjectKoopaFigure::ObjectKoopaFigure(const System::MapdataGeoObj &params)
++    : ObjectCollidable(params), m_state(State::Wait), m_timer(0), m_animFrame(0),
++      m_vomitFrames(0), m_vomitCount(0) {}
++
++/// @addr{0x807726C4}
++ObjectKoopaFigure::~ObjectKoopaFigure() = default;
++
++/// @addr{0x80772054}
++/// @brief The first mouth opening comes after the fireball's start delay (221, 0x808CF3F0)
++/// minus the 42 frames the mouth opens ahead of the launch; the wait clip plays from 0.
++void ObjectKoopaFigure::init() {
++    constexpr s32 BALL_START_COOLDOWN = 221;
++    constexpr s32 MOUTH_LEAD = 42;
++
++    m_state = State::Wait;
++    m_timer = BALL_START_COOLDOWN - MOUTH_LEAD;
++    m_animFrame = 0;
++
++    if (m_drawMdl) {
++        auto *anmMgr = m_drawMdl->anmMgr();
++        anmMgr->playAnim(0.0f, 1.0f, 1);
++        m_vomitFrames = static_cast<u32>(anmMgr->activeAnim(Render::AnmType::Chr)->frameCount());
++        anmMgr->playAnim(0.0f, 1.0f, 0);
++    }
++}
++
++/// @addr{0x8077213C}
++/// @brief While waiting, a spent timer opens the mouth and reloads it: 210 frames in time
++/// trials and ghost races (ObjectDirector +0x55), else 270, the fireball's period
++/// (0x80771248). The vomit clip runs to its end, then the wait clip restarts. The timer
++/// counts down every step.
++void ObjectKoopaFigure::calc() {
++    constexpr s32 PERIOD_TT = 210;
++    constexpr s32 PERIOD = 270;
++
++    ++m_animFrame;
++
++    if (m_state == State::Wait) {
++        if (m_timer < 0) {
++            m_state = State::Vomit;
++            m_timer = System::RaceConfig::Instance()->raceScenario().isTimeTrial() ? PERIOD_TT :
++                                                                                     PERIOD;
++            m_animFrame = 0;
++            ++m_vomitCount;
++        }
++    } else if (m_animFrame >= m_vomitFrames) {
++        m_state = State::Wait;
++        m_animFrame = 0;
++    }
++
++    --m_timer;
++}
++
++void ObjectKoopaFigure::loadAnims() {
++    std::array<const char *, 2> names = {{
++            "wait",
++            "vomit",
++    }};
++
++    std::array<Render::AnmType, 2> types = {{
++            Render::AnmType::Chr,
++            Render::AnmType::Chr,
++    }};
++
++    linkAnims(names, types);
++}
++
++} // namespace Kinoko::Field
+diff --git a/source/game/field/obj/ObjectKoopaFigure.hh b/source/game/field/obj/ObjectKoopaFigure.hh
+new file mode 100644
+index 0000000..4005009
+--- /dev/null
++++ b/source/game/field/obj/ObjectKoopaFigure.hh
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include "game/field/obj/ObjectCollidable.hh"
++
++namespace Kinoko::Field {
++
++/// @brief The Bowser statue on Bowser's Castle (koopaFigure). It has no collision (ObjFlow
++/// mode 0). Its own timer opens its mouth (the vomit clip) 42 frames before its fireball
++/// (ObjectKoopaBall), which runs an independent timer of the same period, launches.
++class ObjectKoopaFigure final : public ObjectCollidable {
++public:
++    ObjectKoopaFigure(const System::MapdataGeoObj &params);
++    ~ObjectKoopaFigure() override;
++
++    void init() override;
++    void calc() override;
++
++    /// @addr{0x807726BC}
++    [[nodiscard]] u32 loadFlags() const override {
++        return 1;
++    }
++
++    void loadAnims() override;
++    void createCollision() override {}
++    void calcCollisionTransform() override {}
++
++    /// Presentation only: retail +0xb0 is 0 while the vomit clip plays, else 1 (wait).
++    [[nodiscard]] bool vomiting() const {
++        return m_state == State::Vomit;
++    }
++
++    /// Presentation only: steps since the current clip (wait or vomit) started from frame 0.
++    [[nodiscard]] u32 animFrame() const {
++        return m_animFrame;
++    }
++
++    /// Presentation only: mouth openings so far; each one fires rk_koopaBall(S).
++    [[nodiscard]] u32 vomitCount() const {
++        return m_vomitCount;
++    }
++
++private:
++    enum class State {
++        Vomit = 0,
++        Wait = 1,
++    };
++
++    State m_state; ///< +0xb0
++    s32 m_timer;   ///< +0xb4
++    u32 m_animFrame;
++    u32 m_vomitFrames; ///< The vomit CHR0's frame count.
++    u32 m_vomitCount;
++};
++
++} // namespace Kinoko::Field
 diff --git a/source/game/field/obj/ObjectKoopaFigure64.cc b/source/game/field/obj/ObjectKoopaFigure64.cc
-index b2afa76..f5a83a5 100644
+index b2afa76..443b6da 100644
 --- a/source/game/field/obj/ObjectKoopaFigure64.cc
 +++ b/source/game/field/obj/ObjectKoopaFigure64.cc
-@@ -53,6 +53,10 @@ void ObjectKoopaFigure64::calc() {
+@@ -2,14 +2,22 @@
+ 
+ #include "game/field/ObjectDirector.hh"
+ 
++#include "game/kart/KartObjectManager.hh"
++
++#include "game/system/RaceConfig.hh"
+ #include "game/system/RaceManager.hh"
+ 
+ namespace Kinoko::Field {
+ 
+ /// @addr{0x806DA914}
++/// @details +0xc1, the timed mode, is ObjectDirector +0x54 (online) or +0x55 (time trials and
++/// ghost races); the port has no online mode. +0xbc is setting 0 squared.
+ ObjectKoopaFigure64::ObjectKoopaFigure64(const System::MapdataGeoObj &params)
+     : ObjectCollidable(params), m_isBigStatue(params.setting(1) == 1),
+-      m_startDelay(static_cast<u32>(params.setting(2))) {}
++      m_timed(System::RaceConfig::Instance()->raceScenario().isTimeTrial()),
++      m_startDelay(static_cast<u32>(params.setting(2))),
++      m_reachSq(static_cast<f32>(static_cast<s32>(static_cast<s16>(params.setting(0))) *
++              static_cast<s32>(static_cast<s16>(params.setting(0))))) {}
+ 
+ /// @addr{0x806DB114}
+ ObjectKoopaFigure64::~ObjectKoopaFigure64() = default;
+@@ -34,6 +42,10 @@ void ObjectKoopaFigure64::init() {
+ }
+ 
+ /// @addr{0x806DAB5C}
++/// @details A resting statue (frame 480) starts a cycle at once in the timed mode. Otherwise
++/// it waits for the kart numbered timer % player count to stand within setting 0 of it on the
++/// x/z plane; objects calc before the karts, so that is the kart's last position. Not ported:
++/// the RaceConfig +0xB74 == 5 branch that burns on every frame (no such mode in the port).
+ void ObjectKoopaFigure64::calc() {
+     u32 timer = System::RaceManager::Instance()->timer();
+     if (timer < m_startDelay) {
+@@ -41,6 +53,15 @@ void ObjectKoopaFigure64::calc() {
+     }
+ 
+     bool endOfCycle = CYCLE_DURATION == m_cycleFrame;
++    if (endOfCycle && !m_timed) {
++        const u8 playerCount = System::RaceConfig::Instance()->raceScenario().playerCount;
++        const auto *kart = Kart::KartObjectManager::Instance()->object(timer % playerCount);
++        const EGG::Vector3f &kartPos = kart->pos();
++        const f32 dx = pos().x - kartPos.x;
++        const f32 dz = pos().z - kartPos.z;
++        endOfCycle = dx * dx + dz * dz <= m_reachSq;
++    }
++
+     if (endOfCycle) {
+         m_cycleFrame = 0;
+ 
+@@ -53,7 +74,14 @@ void ObjectKoopaFigure64::calc() {
          disableCollision();
      }
  
+-    ++m_cycleFrame;
 +    if (m_cycleFrame < FIRE_DURATION) {
 +        cueSound(0x35d, SoundCall::Hold); // SE_CR_64K_FIGURE_FRAME
 +    }
 +
-     ++m_cycleFrame;
++    // A statue at rest stays on frame 480.
++    if (m_cycleFrame < CYCLE_DURATION) {
++        ++m_cycleFrame;
++    }
  }
  
+ /// @addr{0x806DAFB8}
 diff --git a/source/game/field/obj/ObjectKoopaFigure64.hh b/source/game/field/obj/ObjectKoopaFigure64.hh
-index 797553b..84a6c72 100644
+index 797553b..13b128e 100644
 --- a/source/game/field/obj/ObjectKoopaFigure64.hh
 +++ b/source/game/field/obj/ObjectKoopaFigure64.hh
-@@ -36,6 +36,14 @@ public:
+@@ -36,9 +36,19 @@ public:
          return reactionOnKart;
      }
  
@@ -2668,7 +3386,12 @@ index 797553b..84a6c72 100644
 +
  private:
      const bool m_isBigStatue; ///< Differentiates the first rBC turn statue from tiny statues
++    const bool m_timed;       ///< +0xc1: cycles on a timer instead of kart proximity
      const u32 m_startDelay;
++    const f32 m_reachSq; ///< +0xbc: setting 0 squared, the proximity reach (x/z)
+     u32 m_cycleFrame;
+ 
+     static constexpr u32 FIRE_DURATION = 300; ///< How long the statue shoots fire for in a cycle
 diff --git a/source/game/field/obj/ObjectKuribo.cc b/source/game/field/obj/ObjectKuribo.cc
 index 5f58fc9..374ad0e 100644
 --- a/source/game/field/obj/ObjectKuribo.cc
@@ -3661,10 +4384,18 @@ index d6a185a..00c3f1b 100644
  private:
      enum State {
 diff --git a/source/game/field/obj/ObjectRegistry.hh b/source/game/field/obj/ObjectRegistry.hh
-index c206e01..f4bc869 100644
+index c206e01..fc1e2c5 100644
 --- a/source/game/field/obj/ObjectRegistry.hh
 +++ b/source/game/field/obj/ObjectRegistry.hh
-@@ -57,6 +57,8 @@
+@@ -37,6 +37,7 @@
+ #include "game/field/obj/ObjectKCL.hh"
+ #include "game/field/obj/ObjectKinoko.hh"
+ #include "game/field/obj/ObjectKoopaBall.hh"
++#include "game/field/obj/ObjectKoopaFigure.hh"
+ #include "game/field/obj/ObjectKoopaFigure64.hh"
+ #include "game/field/obj/ObjectKuribo.hh"
+ #include "game/field/obj/ObjectNoImpl.hh"
+@@ -57,6 +58,8 @@
  #include "game/field/obj/ObjectSanbo.hh"
  #include "game/field/obj/ObjectSandcone.hh"
  #include "game/field/obj/ObjectShip64.hh"
@@ -4214,11 +4945,55 @@ index e6f2db7..4b19c3f 100644
  
      /// @addr{0x806E1898}
      void enterState3() {}
+diff --git a/source/game/field/obj/ObjectTwistedWay.cc b/source/game/field/obj/ObjectTwistedWay.cc
+index 6814d5a..0bef9e5 100644
+--- a/source/game/field/obj/ObjectTwistedWay.cc
++++ b/source/game/field/obj/ObjectTwistedWay.cc
+@@ -326,7 +326,38 @@ bool ObjectTwistedWay::checkPoleCollision(f32 radius, f32 angle, const EGG::Vect
+     return true;
+ }
+ 
+-f32 ObjectTwistedWay::calcWave(f32 zPercent, u32 t) {
++/// @addr{0x80814428}
++/// @brief Ride slot +0x110: keeps the rider's distance along the road (z), its position across
++/// the twisted road (y) and the twist angle then (x, unused by +0x118).
++EGG::Vector3f ObjectTwistedWay::calcRideRecord(const EGG::Vector3f &pos, u32 timer,
++        bool inRace) const {
++    EGG::Vector3f rel = pos - this->pos();
++    f32 zPercent = -rel.z / HALF_DEPTH;
++    u32 frame = inRace ? timer : m_introTimer;
++    f32 angle = calcWave(zPercent, (frame % PERIOD_LENGTH) * 2);
++    auto [sin, cos] = EGG::Mathf::SinCosFIdx(RAD2FIDX * angle);
++
++    return EGG::Vector3f(angle, rel.x / cos + sin * (0.5f * WIDTH - rel.y), rel.z);
++}
++
++/// @addr{0x808145D8}
++/// @brief Ride slot +0x118: the record's point on the road twisted about the axis
++/// 0.5 * WIDTH above the road's position; up is the twisted road's up.
++void ObjectTwistedWay::calcRidePos(const EGG::Vector3f &record, u32 timer, bool inRace,
++        EGG::Vector3f &pos, EGG::Vector3f &up) const {
++    u32 frame = inRace ? timer : m_introTimer;
++    f32 zPercent = -record.z / HALF_DEPTH;
++    f32 angle = calcWave(zPercent, (frame % PERIOD_LENGTH) * 2);
++    auto [sin, cos] = EGG::Mathf::SinCosFIdx(RAD2FIDX * angle);
++    f32 radius = 0.5f * WIDTH;
++
++    pos.x = record.y * cos + (this->pos().x - radius * sin);
++    pos.y = ((radius + this->pos().y) - radius * cos) - record.y * sin;
++    pos.z = record.z + this->pos().z;
++    up = EGG::Vector3f(sin, cos, 0.0f);
++}
++
++f32 ObjectTwistedWay::calcWave(f32 zPercent, u32 t) const {
+     constexpr f32 WAVINESS = 4.0f;
+     constexpr f32 AMPLITUDE = 0.2f;
+ 
 diff --git a/source/game/field/obj/ObjectTwistedWay.hh b/source/game/field/obj/ObjectTwistedWay.hh
-index 5426b1c..1011593 100644
+index 5426b1c..315b476 100644
 --- a/source/game/field/obj/ObjectTwistedWay.hh
 +++ b/source/game/field/obj/ObjectTwistedWay.hh
-@@ -19,6 +19,10 @@ public:
+@@ -19,6 +19,17 @@ public:
  
      void calc() override;
  
@@ -4226,9 +5001,25 @@ index 5426b1c..1011593 100644
 +        return m_introTimer;
 +    }
 +
++    // The ride slots an s_itembox resting on the road uses (vtable +0x110 / +0x118). Retail reads
++    // RaceManager +0x20 and the stage itself; the caller passes the values its calc would see.
++    [[nodiscard]] EGG::Vector3f calcRideRecord(const EGG::Vector3f &pos, u32 timer,
++            bool inRace) const;
++    void calcRidePos(const EGG::Vector3f &record, u32 timer, bool inRace, EGG::Vector3f &pos,
++            EGG::Vector3f &up) const;
++
      /// @addr{0x80814910}
      [[nodiscard]] u32 loadFlags() const override {
          return 1;
+@@ -108,7 +119,7 @@ private:
+     [[nodiscard]] bool checkPoleCollision(f32 radius, f32 angle, const EGG::Vector3f &relPos,
+             EGG::Vector3f &v0, EGG::Vector3f &fnrm, f32 &dist);
+ 
+-    [[nodiscard]] f32 calcWave(f32 zPercent, u32 t);
++    [[nodiscard]] f32 calcWave(f32 zPercent, u32 t) const;
+ 
+     u32 m_introTimer;
+ 
 diff --git a/source/game/field/obj/ObjectVolcanoBall.cc b/source/game/field/obj/ObjectVolcanoBall.cc
 index e93d05e..c605a33 100644
 --- a/source/game/field/obj/ObjectVolcanoBall.cc
@@ -4450,11 +5241,268 @@ index 7a31e6e..41be821 100644
      EGG::Vector3f m_target; ///< Where the chain chomp is currently moving towards
      EGG::Vector3f m_targetDir;
      bool m_retarget;    ///< Tracks whether the target position has changed in the wait state
+diff --git a/source/game/field/obj/ObjectWoodbox.cc b/source/game/field/obj/ObjectWoodbox.cc
+index dedb26f..1f51228 100644
+--- a/source/game/field/obj/ObjectWoodbox.cc
++++ b/source/game/field/obj/ObjectWoodbox.cc
+@@ -1,13 +1,88 @@
+ #include "ObjectWoodbox.hh"
+ 
++#include "game/field/CollisionDirector.hh"
++#include "game/field/ObjectDirector.hh"
++
++#include "game/item/ItemDirector.hh"
++
++#include "game/kart/KartObject.hh"
++
++#include "game/system/RaceConfig.hh"
++#include "game/system/RaceManager.hh"
++
+ namespace Kinoko::Field {
+ 
++namespace {
++
++/// ObjectDirector +0x55: time trials and ghost races.
++bool timeTrial() {
++    return System::RaceConfig::Instance()->raceScenario().isTimeTrial();
++}
++
++} // namespace
++
+ /// @addr{0x8077E5E4}
+-ObjectWoodbox::ObjectWoodbox(const System::MapdataGeoObj &params) : ObjectBreakable(params) {}
++ObjectWoodbox::ObjectWoodbox(const System::MapdataGeoObj &params)
++    : ObjectBreakable(params), m_respawnTimer(0), m_initialY(0.0f), m_yVel(0.0f),
++      m_breakCount(0), m_breakPos(EGG::Vector3f::zero) {}
+ 
+ /// @addr{0x8077E620}
+ ObjectWoodbox::~ObjectWoodbox() = default;
+ 
++/// @addr{0x8077E678}
++void ObjectWoodbox::init() {
++    ObjectBreakable::init();
++    m_initialY = pos().y;
++    m_yVel = 0.0f;
++}
++
++/// @addr{0x8076ED1C}
++/// @brief Breakable::calc: a broken box (state 2) waits out its timer, then falls back in.
++void ObjectWoodbox::calc() {
++    if (m_state == 2) {
++        if (m_respawnTimer > 0 && --m_respawnTimer == 0) {
++            respawn();
++        }
++    } else if (m_state == 3) {
++        calcFall();
++    }
++}
++
++/// @addr{0x8077ED7C}
++const char *ObjectWoodbox::getKclName() const {
++    return timeTrial() ? "ironbox" : "woodbox";
++}
++
++/// @addr{0x8076F0AC}
++/// @brief Breakable::onCollision. Object reaction 3 breaks the box (vf+0x104, 0x8077E928),
++/// reaction 5 only outside time trials (vf+0x108, 0x8077E9C0). The kart keeps its reaction.
++/// Retail's processKartReactions (0x8081F66C) turns 5 into 3 offline outside time trials,
++/// which Kinoko's does not; the outcome is the same. Not ported: the mission-mode counter and
++/// the rumble of a Star, Mega or Bullet contact (+0xbc).
++Kart::Reaction ObjectWoodbox::onCollision(Kart::KartObject *kartObj,
++        Kart::Reaction reactionOnKart, Kart::Reaction reactionOnObj, EGG::Vector3f & /*hitDepth*/) {
++    if (reactionOnObj == Kart::Reaction::UNK_3 ||
++            (reactionOnObj == Kart::Reaction::UNK_5 && !timeTrial())) {
++        breakBox(kartObj->param()->playerIdx(), kartObj->velocity());
++    }
++
++    return reactionOnKart;
++}
++
++/// @addr{0x8076F1DC}
++/// @brief Breakable::onItemCollision: as onCollision, through vf+0x10c (0x8077EA6C) and
++/// vf+0x110 (0x8077EB08). The item's owner (12 for none) drops the item, which flies along
++/// the negated hit depth. A null item (onGlobalItemCollision) returns at once.
++s16 ObjectWoodbox::onItemCollision(const EGG::Vector3f & /*position*/,
++        const EGG::Vector3f & /*velocity*/, s16 reactionOnItem, s16 reactionOnObj,
++        EGG::Vector3f &hitDepth) {
++    if (reactionOnObj == 3 || (reactionOnObj == 5 && !timeTrial())) {
++        breakBox(ObjectDirector::Instance()->itemOwner(), -hitDepth);
++    }
++
++    return reactionOnItem;
++}
++
+ /// @addr{0x8077EBB8}
+ void ObjectWoodbox::calcCollisionTransform() {
+     constexpr f32 HALF_SIZE = 100.0f;
+@@ -23,4 +98,83 @@ void ObjectWoodbox::calcCollisionTransform() {
+     m_collision->transform(mat, scale(), getCollisionTranslation());
+ }
+ 
++/// @addr{0x8077E928} @addr{0x8077EA6C}
++/// @brief The item drop (vf+0xf8), the break effect (vf+0x100, 0x8076EFDC, presentation) and
++/// SE_CC_WOODBOX_BRK.
++void ObjectWoodbox::breakBox(u8 owner, const EGG::Vector3f &velocity) {
++    dropItem(owner, velocity);
++    m_breakPos = pos();
++    ++m_breakCount;
++    cueSound(0x1e0, SoundCall::Start);
++}
++
++/// @addr{0x8076EDE4} @addr{0x8077E704}
++/// @brief Breakable's item drop and Woodbox's override. The box is hidden (vf+0x68) and, with
++/// percentage setting 2, drops an item from ItemSlot row setting 1. It always ends broken and
++/// intangible; with setting 3 at 0 it falls back in 300 frames later.
++void ObjectWoodbox::dropItem(u8 owner, const EGG::Vector3f &velocity) {
++    constexpr f32 DROP_HEIGHT = 300.0f;
++    constexpr u32 RESPAWN_FRAMES = 300;
++
++    // RaceManager +0x4 offline (0x80782F74). The chance is drawn even when nothing drops.
++    // Not ported: RaceConfig +0xB80 == 3 (no items) also stops the drop; the port has no
++    // such mode.
++    auto &random = System::RaceManager::Instance()->random();
++    if (random.getF32(100.0f) < static_cast<f32>(static_cast<s16>(m_mapObj->setting(2)))) {
++        EGG::Vector3f vel = velocity * 2.0f;
++        vel.y = 2.0f + random.getF32(1.0f);
++
++        calcRotLock();
++        EGG::Matrix34f mat;
++        mat.makeR(EGG::Vector3f(rot().x, 0.0f, 0.0f));
++        vel = mat.ps_multVector(vel);
++
++        // ItemSlotData::decideItem (0x807BB42C) then draws nextU32(sum of the row's weights)
++        // from the same random: drawn here, so the sequence never depends on the hook.
++        const u32 word = random.getU32();
++        Item::ItemDirector::CreateCourseDrop(m_mapObj->setting(1),
++                pos() + EGG::Vector3f(0.0f, DROP_HEIGHT, 0.0f), vel, owner, word);
++    }
++
++    m_state = 2;
++    disableCollision();
++
++    if (m_mapObj->setting(3) == 0) {
++        m_respawnTimer = RESPAWN_FRAMES;
++    }
++}
++
++/// @addr{0x8077E750}
++void ObjectWoodbox::respawn() {
++    constexpr f32 RESPAWN_HEIGHT = 5000.0f;
++
++    ObjectBreakable::enableCollision();
++    m_state = 3;
++    setPos(EGG::Vector3f(pos().x, m_initialY + RESPAWN_HEIGHT, pos().z));
++    m_yVel = 0.0f;
++}
++
++/// @addr{0x8077E7B0} @addr{0x8077E7E0}
++/// @brief The box falls back in and settles (state 1) once a bounce is slower than 1.
++void ObjectWoodbox::calcFall() {
++    constexpr f32 GRAVITY = 2.0f;
++    constexpr f32 RADIUS = 100.0f;
++    constexpr f32 BOUNCE_FACTOR = -0.1f;
++
++    m_yVel -= GRAVITY;
++    addPos(EGG::Vector3f(0.0f, m_yVel, 0.0f));
++
++    CollisionInfo info;
++    if (CollisionDirector::Instance()->checkSphereFull(RADIUS,
++                pos() + EGG::Vector3f(0.0f, RADIUS, 0.0f), EGG::Vector3f::inf, KCL_TYPE_FLOOR,
++                &info, nullptr, 0)) {
++        m_yVel *= BOUNCE_FACTOR;
++        addPos(info.tangentOff);
++        if (EGG::Mathf::abs(m_yVel) < 1.0f) {
++            m_state = 1;
++        }
++        cueSound(0x1e1, SoundCall::StartNew); // SE_CC_WOODBOX_GND
++    }
++}
++
+ } // namespace Kinoko::Field
+diff --git a/source/game/field/obj/ObjectWoodbox.hh b/source/game/field/obj/ObjectWoodbox.hh
+index 3792b93..8b06997 100644
+--- a/source/game/field/obj/ObjectWoodbox.hh
++++ b/source/game/field/obj/ObjectWoodbox.hh
+@@ -9,12 +9,39 @@ public:
+     ObjectWoodbox(const System::MapdataGeoObj &params);
+     ~ObjectWoodbox() override;
+ 
+-    /// @addr{0x8077ED7C}
+-    [[nodiscard]] const char *getKclName() const override {
+-        return "ironbox"; // woodbox when not in TTs
+-    }
++    void init() override;
++    void calc() override;
++
++    [[nodiscard]] const char *getKclName() const override;
++
++    Kart::Reaction onCollision(Kart::KartObject *kartObj, Kart::Reaction reactionOnKart,
++            Kart::Reaction reactionOnObj, EGG::Vector3f &hitDepth) override;
++    s16 onItemCollision(const EGG::Vector3f &position, const EGG::Vector3f &velocity,
++            s16 reactionOnItem, s16 reactionOnObj, EGG::Vector3f &hitDepth) override;
+ 
+     void calcCollisionTransform() override;
++
++    /// Presentation only: breaks so far; each one fires rk_woodbox (0x8076EFDC) at the box.
++    [[nodiscard]] u32 breakCount() const {
++        return m_breakCount;
++    }
++
++    /// Presentation only: the position of the last break.
++    [[nodiscard]] const EGG::Vector3f &breakPos() const {
++        return m_breakPos;
++    }
++
++private:
++    void breakBox(u8 owner, const EGG::Vector3f &velocity);
++    void dropItem(u8 owner, const EGG::Vector3f &velocity);
++    void respawn();
++    void calcFall();
++
++    s32 m_respawnTimer; ///< Breakable +0xb4: frames until a broken box falls back in.
++    f32 m_initialY;     ///< +0xc0
++    f32 m_yVel;         ///< +0xc4
++    u32 m_breakCount;
++    EGG::Vector3f m_breakPos;
+ };
+ 
+ } // namespace Kinoko::Field
+diff --git a/source/game/field/obj/ObjectWoodboxWSub.cc b/source/game/field/obj/ObjectWoodboxWSub.cc
+index 207938c..61daf8c 100644
+--- a/source/game/field/obj/ObjectWoodboxWSub.cc
++++ b/source/game/field/obj/ObjectWoodboxWSub.cc
+@@ -21,8 +21,10 @@ void ObjectWoodboxWSub::calc() {
+ void ObjectWoodboxWSub::calcPosition() {
+     auto status = m_railInterpolator->calc();
+ 
++    // The route end hides the crate and makes it intangible until its next spawn.
+     if (status == RailInterpolator::Status::ChangingDirection) {
+         m_state = 0;
++        disableCollision();
+     }
+ 
+     setPos(m_railInterpolator->curPos());
+diff --git a/source/game/field/obj/ObjectWoodboxWSub.hh b/source/game/field/obj/ObjectWoodboxWSub.hh
+index db5aa67..a1a7a96 100644
+--- a/source/game/field/obj/ObjectWoodboxWSub.hh
++++ b/source/game/field/obj/ObjectWoodboxWSub.hh
+@@ -10,9 +10,11 @@ public:
+     ~ObjectWoodboxWSub() override;
+ 
+     /// @addr{0x8077E3E4}
++    /// @brief Hidden and intangible until the spawner enables it.
+     void init() override {
+         ObjectBreakable::init();
+         m_state = 0;
++        disableCollision();
+     }
+ 
+     void calc() override;
 diff --git a/source/game/item/ItemDirector.cc b/source/game/item/ItemDirector.cc
-index 9414c8f..4711579 100644
+index 9414c8f..222b24c 100644
 --- a/source/game/item/ItemDirector.cc
 +++ b/source/game/item/ItemDirector.cc
-@@ -3,6 +3,19 @@
+@@ -3,6 +3,33 @@
  #include "game/system/RaceConfig.hh"
  
  namespace Kinoko::Item {
@@ -4471,14 +5519,28 @@ index 9414c8f..4711579 100644
 +        const EGG::Vector3f &velocity, u8 owner) {
 +    if (s_pickupHook) s_pickupHook(s_pickupContext, position, velocity, owner);
 +}
++
++ItemDirector::CourseDropHook ItemDirector::s_dropHook = nullptr;
++void *ItemDirector::s_dropContext = nullptr;
++
++void ItemDirector::SetCourseDropHook(CourseDropHook hook, void *context) {
++    s_dropHook = hook; s_dropContext = context;
++}
++void ItemDirector::ClearCourseDropHook(void *context) {
++    if (context == s_dropContext) { s_dropHook = nullptr; s_dropContext = nullptr; }
++}
++void ItemDirector::CreateCourseDrop(u16 slot, const EGG::Vector3f &position,
++        const EGG::Vector3f &velocity, u8 owner, u32 randomWord) {
++    if (s_dropHook) s_dropHook(s_dropContext, slot, position, velocity, owner, randomWord);
++}
  
  /// @addr{0x80799794}
  void ItemDirector::init() {
 diff --git a/source/game/item/ItemDirector.hh b/source/game/item/ItemDirector.hh
-index cf05b06..9b5298c 100644
+index cf05b06..8c1380e 100644
 --- a/source/game/item/ItemDirector.hh
 +++ b/source/game/item/ItemDirector.hh
-@@ -30,6 +30,13 @@ public:
+@@ -30,6 +30,21 @@ public:
  
      static ItemDirector *CreateInstance();
      static void DestroyInstance();
@@ -4489,15 +5551,25 @@ index cf05b06..9b5298c 100644
 +    static void ClearCoursePickupHook(void *context);
 +    static void CreateCourseMushroom(const EGG::Vector3f &position,
 +            const EGG::Vector3f &velocity, u8 owner);
++    // A broken crate's item (Breakable 0x8076EDE4): ItemSlot row `slot` (setting 1) picks it
++    // with `randomWord`, the RaceManager draw decideItem's nextU32 makes (0x807BB42C).
++    using CourseDropHook = void (*)(void *, u16, const EGG::Vector3f &, const EGG::Vector3f &,
++            u8, u32);
++    static void SetCourseDropHook(CourseDropHook hook, void *context);
++    static void ClearCourseDropHook(void *context);
++    static void CreateCourseDrop(u16 slot, const EGG::Vector3f &position,
++            const EGG::Vector3f &velocity, u8 owner, u32 randomWord);
  
      [[nodiscard]] const ItemInventory &itemInventory(s16 idx) const {
          return m_karts[idx].inventory();
-@@ -48,6 +55,8 @@ private:
+@@ -48,6 +63,10 @@ private:
      owning_span<KartItem> m_karts;
  
      static ItemDirector *s_instance; ///< @addr{0x809C3618}
 +    static CoursePickupHook s_pickupHook;
 +    static void *s_pickupContext;
++    static CourseDropHook s_dropHook;
++    static void *s_dropContext;
  };
  
  } // namespace Item
@@ -6779,7 +7851,7 @@ index 3f8a267..f708ee9 100644
      f32 leanRotMin = -m_leanRotCap;
      f32 leanRotMax = m_leanRotCap;
 diff --git a/source/game/kart/KartMove.hh b/source/game/kart/KartMove.hh
-index 9845504..6dd0ee0 100644
+index 9845504..fa7c27c 100644
 --- a/source/game/kart/KartMove.hh
 +++ b/source/game/kart/KartMove.hh
 @@ -1,6 +1,7 @@
@@ -6904,7 +7976,7 @@ index 9845504..6dd0ee0 100644
      }
  
      /// @addr{0x80581720}
-@@ -224,6 +301,137 @@ public:
+@@ -224,6 +301,123 @@ public:
      }
      /// @endSetters
  
@@ -6986,14 +8058,6 @@ index 9845504..6dd0ee0 100644
 +            m_soundCues.objectSounds[m_soundCues.objectSoundCount++] = {object, wall};
 +        }
 +    }
-+    /// @brief Port, audio only: every kart contact an object's onCollision (vtable +0xC0) sees,
-+    /// in or out of an action, with its reaction on the object (Wiggler segments: fn_1_1B68E0).
-+    /// Recorded for the race audio only; it changes no reaction and nothing reads it here.
-+    void cueObjectReaction(const void *object, s32 reactionOnObj) {
-+        if (m_soundCues.objectContactCount < m_soundCues.objectContacts.size()) {
-+            m_soundCues.objectContacts[m_soundCues.objectContactCount++] = {object, reactionOnObj};
-+        }
-+    }
 +    /// @brief Port, audio only: activateOob's Effects::Player call (0x806AB6B0) on a fall boundary.
 +    void cueFallBoundary(u8 variant) {
 +        m_soundCues.fallBoundary = variant;
@@ -7021,12 +8085,6 @@ index 9845504..6dd0ee0 100644
 +        };
 +        std::array<ObjectSound, 4> objectSounds{};
 +        u8 objectSoundCount = 0;
-+        struct ObjectContact {
-+            const void *object; ///< The Field::ObjectBase.
-+            s32 reaction;       ///< Its reaction on the object after processKartReactions.
-+        };
-+        std::array<ObjectContact, 8> objectContacts{};
-+        u8 objectContactCount = 0;
 +        u8 fallBoundary = 0xff; ///< The fall boundary's KCL variant (0xff: none).
 +        std::array<u16, 4> kartSounds{};
 +        u8 kartSoundCount = 0;
@@ -7042,7 +8100,7 @@ index 9845504..6dd0ee0 100644
      /// @beginGetters
      [[nodiscard]] DriftState driftState() const {
          return m_driftState;
-@@ -292,6 +500,10 @@ public:
+@@ -292,6 +486,10 @@ public:
          return m_lastDir;
      }
  
@@ -7053,7 +8111,7 @@ index 9845504..6dd0ee0 100644
      [[nodiscard]] const EGG::Vector3f &vel1Dir() const {
          return m_vel1Dir;
      }
-@@ -300,6 +512,17 @@ public:
+@@ -300,6 +498,17 @@ public:
          return m_smoothedForward;
      }
  
@@ -7071,7 +8129,7 @@ index 9845504..6dd0ee0 100644
      [[nodiscard]] f32 speedRatioCapped() const {
          return m_speedRatioCapped;
      }
-@@ -328,6 +551,12 @@ public:
+@@ -328,6 +537,12 @@ public:
          return m_respawnPostLandTimer;
      }
  
@@ -7084,7 +8142,7 @@ index 9845504..6dd0ee0 100644
      [[nodiscard]] PadType &padType() {
          return m_padType;
      }
-@@ -354,6 +583,7 @@ protected:
+@@ -354,6 +569,7 @@ protected:
          Respawned = 0,   ///< Set when Lakitu lets go of the player, cleared when landing.
          DriftReset = 1,  ///< Set when a wall bonk should cancel your drift.
          SsmtCharged = 2, ///< Set after holding a stand-still mini-turbo for 75 frames.
@@ -7092,7 +8150,7 @@ index 9845504..6dd0ee0 100644
          LaunchBoost = 4,
          SsmtLeeway = 5,       ///< If set, activates SSMT when not pressing A or B.
          TrickableSurface = 6, ///< Set when driving on a trickable surface.
-@@ -383,12 +613,26 @@ protected:
+@@ -383,12 +599,26 @@ protected:
          f32 boostRotFactor;
      };
  
@@ -7120,7 +8178,7 @@ index 9845504..6dd0ee0 100644
      f32 m_acceleration;   ///< Captures the acceleration from player input and boosts.
      f32 m_speedDragMultiplier;  ///< After 5 frames of airtime, this causes speed to slowly decay.
      EGG::Vector3f m_smoothedUp; ///< A smoothed up vector, mostly used after significant airtime.
-@@ -459,17 +703,26 @@ protected:
+@@ -459,17 +689,26 @@ protected:
      s16 m_respawnPreLandTimer;  ///< Counts down from 4 when pressing A before landing from respawn.
      s16 m_respawnPostLandTimer; ///< Counts up to 4 if not accelerating after respawn landing.
      s16 m_respawnTimer;

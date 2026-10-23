@@ -79,8 +79,10 @@ struct ItemBoxLine { std::vector<uint16_t> movers; int32_t timer=0,period=0; uin
 // point marked 2 to the belt end; collected boxes stay gone for that pass.
 struct ItemBoxPress { const Kinoko::Field::ObjectItemboxPress* object=nullptr; uint16_t box=0,reveal=0xffff; bool taken=false; };
 // An s_itembox that landed on a drivable object it rides (retail RMCP calc 8082945c): its
-// position is the object's position plus this offset.
-struct ItemBoxRide { const Kinoko::Field::ObjectBase* object=nullptr; uint16_t box=0; Vec3 offset{}; };
+// position is the object's position plus this offset. On the Rainbow Road aurora and the
+// Bowser's Castle twisted road, offset is the object's ride record and the box sits at the
+// object's ride position + (0,180,0) + lift (setting 6).
+struct ItemBoxRide { const Kinoko::Field::ObjectBase* object=nullptr; uint16_t box=0; Vec3 offset{}; float lift=0; };
 struct ItemActor {
     ItemKind kind=ItemKind::None;
     Vec3 position{}, previous{}, velocity{},flightDirection{0,0,1};
@@ -203,7 +205,7 @@ public:
     /// The item manager's Time Trial flag (PAL 0x809C38BC): RaceGlobals_init 0x807BD1D0 sets
     /// it from RaceConfig +0xB70 for Time Trial and Ghost Race. Set before resetFromCourse.
     void setTimeTrial(bool timeTrial){timeTrial_=timeTrial;}
-    bool loadOdds(const void* data,size_t size){return grandPrix_?odds_.load(data,size,0,1):odds_.load(data,size,2,3);}
+    bool loadOdds(const void* data,size_t size){courseDropOdds_.load(data,size);return grandPrix_?odds_.load(data,size,0,1):odds_.load(data,size,2,3);}
     bool oddsReady()const{return odds_.ready();}
     bool loadShellRoute(const void* bytes,size_t size,unsigned course=0xffff){shellCourse_=course;return shellRoute_.load(bytes,size);}
     const ShellRoute& shellRoute()const{return shellRoute_;}
@@ -248,6 +250,7 @@ public:
     static bool segmentHits(Vec3 from,Vec3 to,Vec3 center,float radius);
 private:
     ItemOdds odds_;
+    CourseDropOdds courseDropOdds_;
     bool grandPrix_=false,timeTrial_=false;
     ShellRoute shellRoute_;
     unsigned shellCourse_=0xffff;
@@ -377,6 +380,9 @@ public:
     // A course object's loose Mushroom (a squashed Goomba, Kinoko ObjectKuribo):
     // launched from the object; owner 12 is nobody.
     void courseMushroom(Vec3 position,Vec3 velocity,unsigned owner);
+    // A broken crate's item (Kinoko ObjectWoodbox): ItemSlot drop row `slot`, picked with
+    // `randomWord` (Kinoko's RaceManager draw); owner 12 is nobody.
+    void courseDrop(unsigned slot,Vec3 position,Vec3 velocity,unsigned owner,uint32_t randomWord);
 private:
     void releaseHeld(unsigned player,bool backwards);
     void removeHeld(unsigned player,unsigned slot,bool breakChain);

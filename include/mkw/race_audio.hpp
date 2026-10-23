@@ -151,9 +151,6 @@ void fillRaceAudioItems(RaceAudioFrame& frame, const RaceItems& items);
 // the registry restarts with each race scene.
 void fillRaceAudioObjects(RaceAudioFrame& frame);
 void resetRaceAudioObjects();
-// A Wiggler body segment (Kinoko Field::ObjectBase) a kart or an item touched this step
-// without damaging it: the next step's objects voice it (src/race_audio_frame.cpp).
-void noteRaceAudioHanachanBump(const void* segment);
 
 class RaceAudioLayer final : public SoundLayer {
 public:

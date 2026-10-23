@@ -29,6 +29,7 @@
 #include <game/field/obj/ObjectItemboxPress.hh>
 #include <game/field/RailManager.hh>
 #include <game/field/obj/ObjectKoopaBall.hh>
+#include <game/field/obj/ObjectKoopaFigure.hh>
 #include <game/field/obj/ObjectTruckWagon.hh>
 #include <game/field/obj/ObjectTwistedWay.hh>
 #include <game/field/obj/ObjectKuribo.hh>
@@ -40,6 +41,7 @@
 #include <game/field/obj/ObjectVolcanoBall.hh>
 #include <game/field/obj/ObjectVolcanoBallLauncher.hh>
 #include <game/field/obj/ObjectWanwan.hh>
+#include <game/field/obj/ObjectWoodbox.hh>
 #include <game/system/RaceManager.hh>
 #pragma GCC diagnostic pop
 #include <algorithm>
@@ -238,7 +240,11 @@ void drawHanachan(ObjectDraw& d,Visual& v){
     const float frame=float(d.tick);
     for(size_t i=0;i<h.partCount();++i){
         const auto* part=h.part(i);if(!part)continue;
-        const C3D_Mtx m=liveMatrix(*part);
+        C3D_Mtx m=liveMatrix(*part);
+        // Retail vtable +0x6c (0x806CCA14): both models at the part's position plus its hop
+        // height or contact shake; the collision stays at the position.
+        const auto& offset=static_cast<const K::Field::ObjectHanachanPart*>(part)->hitOffset();
+        m.r[0].w+=offset.x;m.r[1].w+=offset.y;m.r[2].w+=offset.z;
         if(i==0){
             Anim a;a.clip=v.clips[walking?0:1];a.frame=frame;
             d.submit(v.main.model,m,a);
@@ -505,14 +511,11 @@ void drawHeyhoBall(ObjectDraw& d,Visual& v){
     d.submit(v.main.model,m,a);
     if(v.shadow.model)d.shadow(v.shadow.model,m);
 }
-// The statue's vomit clip starts as its fireball leaves the mouth.
+// Bowser's statue (Kinoko ObjectKoopaFigure, retail calc 0x8077213C): its own timer plays
+// the vomit clip 42 frames before its fireball launches, then the wait clip from frame 0.
 void drawKoopaFigure(ObjectDraw& d,Visual& v){
-    Anim a;a.clip=v.clips[0];a.frame=float(d.tick);
-    if(v.partner){
-        const int state=static_cast<const K::Field::ObjectKoopaBall*>(v.partner)->state();
-        const unsigned age=stateAge(d,v,state);
-        if(state==0&&v.clips[1]>=0&&float(age)<clipFrames(v.main,v.clips[1])){a.clip=v.clips[1];a.frame=float(age);}
-    }
+    const auto& statue=*static_cast<const K::Field::ObjectKoopaFigure*>(v.object);
+    Anim a;a.clip=v.clips[statue.vomiting()?1:0];a.frame=float(statue.animFrame());
     d.submit(v.main.model,v.placement,a);
 }
 // DS Peach Gardens chomps roam as the manager's child object.
@@ -750,13 +753,19 @@ void drawFlamePoleV(ObjectDraw& d,Visual& v){
 }
 // Toad's Factory crate lines (Kinoko ObjectWoodboxW, retail RMCP 8077e1e4): the
 // spawner has no model (0x8077ECD8). Each crate (WoodboxWSub) shows from its
-// spawn (Breakable::enableCollision 0x8076ED70) until its route ends
-// (0x8077E49C), at its live transform; the spawner is the last part.
+// spawn (Breakable::enableCollision 0x8076ED70) until it breaks (0x8076EDE4) or its
+// route ends (0x8077E49C), at its live transform; the spawner is the last part.
 void drawWoodboxLine(ObjectDraw& d,Visual& v){
     for(const auto* part:v.parts){
-        if(part==v.object||static_cast<const K::Field::ObjectBreakable*>(part)->state()-1u>1u)continue;
+        if(part==v.object||!static_cast<const K::Field::ObjectBreakable*>(part)->shown())continue;
         d.submit(v.main.model,liveMatrix(*part),{});
     }
+}
+// Delfino Square's crates (Kinoko ObjectWoodbox): hidden while broken, shown again as
+// they fall back in (0x8077E750).
+void drawWoodbox(ObjectDraw& d,Visual& v){
+    if(!static_cast<const K::Field::ObjectBreakable*>(v.object)->shown())return;
+    d.submit(v.main.model,liveMatrix(*v.object),{});
 }
 // Delfino Square's drawbridge (RMCP ObjectTownBridge::calc 80809774): Kinoko
 // tilts the object by the bridge angle (rot z) and retail stops its CHR0 on
@@ -887,6 +896,9 @@ bool classifyObject(Visual& v,const ObjectAssets& assets,int course){
         const auto* config=K::System::RaceConfig::Instance();
         v.present=drawWoodboxLine;v.main=find(assets,"woodbox",config&&config->raceScenario().isTimeTrial()?"ironbox":"woodbox");
         v.low=v.shadow={};
+    }else if(id==ObjectId::Woodbox&&live){
+        v.present=drawWoodbox;v.main=find(assets,"woodbox",static_cast<const K::Field::ObjectWoodbox*>(v.object)->getKclName());
+        v.low=v.shadow={};
     }else if(id==ObjectId::TownBridge&&live){
         v.present=drawTownBridge;
     }else if((id==ObjectId::ObakeBlockSFCc||id==ObjectId::ObakeBlock2SFCc||id==ObjectId::ObakeBlock3SFCc)&&live){
@@ -913,7 +925,7 @@ bool classifyObject(Visual& v,const ObjectAssets& assets,int course){
         v.extra[0]=find(assets,"koopaBall","ef_koopaBall","ef_koopaBall");v.shadow=find(assets,"koopaBall","koopaBall-shadow");
     }else if(id==ObjectId::HeyhoBallGBA&&live){
         v.present=drawHeyhoBall;v.clips[0]=color(v.main,"HeyhoBallGBA_blink");
-    }else if(named(v,"koopaFigure")){
+    }else if(id==ObjectId::KoopaFigure&&live){
         v.present=drawKoopaFigure;v.clips[0]=clip(v.main,"wait");v.clips[1]=clip(v.main,"vomit");
     }else if(id==ObjectId::Hwanwan&&live){
         v.present=drawHwanwan;v.main=find(assets,"wanwan","wanwan","wanwan");v.shadow=find(assets,"wanwan","wanwan-shadow");
