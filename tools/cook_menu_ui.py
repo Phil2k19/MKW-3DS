@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 from cook_race_hud import sections,string,layout,animation,sample,font_strings,variant
-from cook_race_items import cook_image_sprite,decode_tpl,digest
+from cook_race_items import decode_tpl,digest
+from devkitpro import tool
 from cook_roster import ROOT
 from menu_layout import render_layout,controllers,controller_alphas,controller_animations,messages,message_font_indices,pane_nodes
 from menu_movies import extract_movies,ThpMovie
@@ -19,6 +20,20 @@ records={}; evidence={}; panel_records={}; pane_records={}; node_records={}; mov
 def source(p):
  key=p.relative_to(ROOT).as_posix()
  if key not in evidence:evidence[key]=digest(p)
+def ui_sprite(img,name):
+ # cook_race_items.cook_image_sprite with LZ11 instead of raw RGBA8 (the race
+ # sprites it also cooks stay raw); Tex3DS_TextureImport decompresses either.
+ width,height=img.size;padded=tuple(max(8,1<<(v-1).bit_length()) for v in img.size)
+ canvas=Image.new('RGBA',padded);canvas.paste(img,(0,0))
+ target=OUT/'textures'/(name+'.png');target.parent.mkdir(parents=True,exist_ok=True);canvas.save(target)
+ subprocess.run([str(tool('tex3ds')),'-f','rgba8','-z','lz11','-o',str(target.with_suffix('.t3x')),str(target)],check=True,stdout=subprocess.DEVNULL)
+ return {'name':name,'path':'textures/'+name+'.t3x','width':width,'height':height,'padded':list(padded),'u':width/padded[0],'v':height/padded[1]}
+def lz11_t3x(path):
+ # tex3ds: u16 subtextures, three size/format/mipmap bytes, 12-byte subtexture records, then the compression type.
+ with open(path,'rb') as f:
+  head=f.read(5)
+  if len(head)<5:return False
+  f.seek(5+12*(head[0]|head[1]<<8));return f.read(1)==b'\x11'
 def save(name,img,p=None):
  native_width,native_height=img.size
  if max(img.size)>1024:
@@ -29,7 +44,10 @@ def save(name,img,p=None):
  if target.exists() and target.with_suffix('.t3x').exists():
   with Image.open(target) as previous:
    cached=previous.size==tuple(padded) and previous.crop((0,0,width,height)).convert('RGBA').tobytes()==img.convert('RGBA').tobytes()
- r={'name':'ui_'+name,'path':'textures/ui_'+name+'.t3x','width':width,'height':height,'padded':padded,'u':width/padded[0],'v':height/padded[1]} if cached else cook_image_sprite(img,'ui_'+name,OUT)
+  # Sprites the fitter does not resize ship from race.pak and load at every
+  # page change: LZ11, about 10-80x smaller to read (raw ones from older builds re-cook).
+  cached=cached and lz11_t3x(target.with_suffix('.t3x'))
+ r={'name':'ui_'+name,'path':'textures/ui_'+name+'.t3x','width':width,'height':height,'padded':padded,'u':width/padded[0],'v':height/padded[1]} if cached else ui_sprite(img,'ui_'+name)
  if p:source(p);r.update(source=p.relative_to(ROOT).as_posix(),source_sha256=evidence[p.relative_to(ROOT).as_posix()])
  if (native_width,native_height)!=(width,height):r.update(width=native_width,height=native_height,rasterWidth=width,rasterHeight=height)
  records[name]=r

@@ -22,7 +22,13 @@ namespace mkw
             Machine
         };
         // Resident entries per kind: browsing neighbours stay warm, LINEAR stays bounded.
-        constexpr unsigned Capacity[] = {6, 4, 12};
+        // Drivers: the character page's cursor and its eight neighbours one and two
+        // steps away, plus one. Those carry only the sel_* clips (SelClips), about
+        // 45% of a full bank, so ten cost about what six full drivers did.
+        constexpr unsigned Capacity[] = {10, 4, 12};
+        // A menu driver bank's first two clips are sel_gut and sel_wait (every
+        // ui_driver_*.dskm); the seated "-wait" clips follow (machine pages only).
+        constexpr unsigned SelClips = 2;
         constexpr std::uint32_t LinearReserve = 3u << 20;
         bool machinePage(UiPage page)
         {
@@ -87,10 +93,13 @@ namespace mkw
         struct Wanted
         {
             int driver = -1, machine = -1, background = -1;
+            // The driver sits on a machine: its bank needs the seated clips.
+            bool driverFull = false;
         };
         Wanted wanted(const MenuState &state)
         {
             Wanted w;
+            w.driverFull = machinePage(state.page);
             w.driver = state.page == UiPage::Character ? int(state.characterDriver(state.cursor)) : machinePage(state.page) ? int(state.selection.driver)
                                                                                                                             : -1;
             const unsigned choice = state.page == UiPage::Vehicle ? state.vehicleChoice(state.cursor) : state.selection.vehicle;
@@ -142,7 +151,9 @@ namespace mkw
             std::unique_ptr<Model> model;
             std::unique_ptr<DriverAnimation> animation;
             std::vector<uint16_t> environment;
-            ModelJob(int k, int i) : kind(k), id(i)
+            // Driver banks: 0 = every clip, SelClips = the character page's sel_* clips.
+            unsigned keepClips = 0;
+            ModelJob(int k, int i, unsigned keep = 0) : kind(k), id(i), keepClips(keep)
             {
                 label = k == Driver ? "driver model" : k == Background ? "background model"
                                                                        : "machine model";
@@ -175,7 +186,7 @@ namespace mkw
                 if (!animationPath.empty())
                 {
                     auto bank = std::make_unique<DriverAnimation>();
-                    if (bank->load(animationPath.c_str(), *loaded))
+                    if (bank->load(animationPath.c_str(), *loaded, keepClips))
                     {
                         // A newly selected driver first shows sel_wait frame zero.
                         if (kind == Driver)
@@ -203,7 +214,11 @@ namespace mkw
         std::vector<uint16_t> environment;
         std::uint32_t used = 0, pinned = 0;
         bool failed = false;
+        // A driver whose bank holds every clip (the seated ones too).
+        bool full = true;
         bool resident() const { return model != nullptr; }
+        // Resident with the clips this page plays (machine pages: the seated set).
+        bool usable(bool needFull) const { return model && (full || !needFull); }
     };
     MenuModels::MenuModels() = default;
     MenuModels::~MenuModels() = default;
@@ -243,10 +258,13 @@ namespace mkw
             e.used = clock_;
             if (priority != AssetPriority::Prefetch)
                 e.pinned = clock_;
-            if (e.resident() || e.failed)
+            // The character page loads a driver with its sel_* clips only; a machine
+            // page loads the full bank in its place (the old one shows meanwhile).
+            const bool needFull = kind == Driver && w.driverFull;
+            if (e.usable(needFull) || e.failed)
                 continue;
             if (!e.job || (e.job->done() && e.job->cancelled()))
-                e.job = std::make_shared<ModelJob>(kind, id);
+                e.job = std::make_shared<ModelJob>(kind, id, kind == Driver && !needFull ? SelClips : 0u);
             if (!e.job->done())
                 AssetLoader::instance().submit(e.job, priority);
         }
@@ -260,7 +278,7 @@ namespace mkw
             if (id < 0)
                 continue;
             const auto *e = find(kind, id);
-            if (!e || (!e->resident() && !e->failed))
+            if (!e || (!e->usable(kind == Driver && w.driverFull) && !e->failed))
                 return false;
         }
         return true;
@@ -290,7 +308,7 @@ namespace mkw
         if (kind == Machine)
             shownMachine_ = id;
     }
-    void MenuModels::update(Renderer &renderer, const MenuState &visual)
+    void MenuModels::update(Renderer &renderer, const MenuState &visual, std::uint32_t freeing)
     {
         for (auto &e : entries_)
             if (e->job && e->job->done())
@@ -298,9 +316,14 @@ namespace mkw
                 auto job = std::move(e->job);
                 if (job->model)
                 {
+                    // A full bank replacing a character page one: the GPU may still
+                    // read the old model this frame.
+                    if (e->model)
+                        renderer.retire(std::move(e->model));
                     e->model = std::move(job->model);
                     e->animation = std::move(job->animation);
                     e->environment = std::move(job->environment);
+                    e->full = job->keepClips == 0;
                 }
                 else if (!job->cancelled())
                     e->failed = true;
@@ -315,7 +338,7 @@ namespace mkw
                 return;
             }
             const auto *e = find(kind, id);
-            if (e && e->resident())
+            if (e && e->usable(kind == Driver && w.driverFull))
                 show(renderer, kind, id);
             else if (e && e->failed)
                 show(renderer, kind, -1);
@@ -384,7 +407,10 @@ namespace mkw
             const bool shown = (e.kind == Driver && e.id == shownDriver_) || (e.kind == Background && e.id == shownBackground_) || (e.kind == Machine && e.id == shownMachine_);
             return !shown && e.pinned != clock_;
         };
-        std::uint32_t retiring = 0;
+        // freeing: what the texture cache retired this frame (MenuRenderer::update).
+        // It returns to LINEAR next frame; without it the cache's own trim to the
+        // reserve read as low memory here and evicted every prefetched model.
+        std::uint32_t retiring = freeing;
         for (;;)
         {
             unsigned counts[3]{};
@@ -428,13 +454,16 @@ namespace mkw
             if (e->job && !e->job->done())
             {
                 e->job->cancel();
-                auto job = std::make_shared<ModelJob>(e->kind, e->id);
+                auto job = std::make_shared<ModelJob>(e->kind, e->id, e->job->keepClips);
                 job->run();
                 if (job->model)
                 {
+                    if (e->model)
+                        renderer.retire(std::move(e->model));
                     e->model = std::move(job->model);
                     e->animation = std::move(job->animation);
                     e->environment = std::move(job->environment);
+                    e->full = job->keepClips == 0;
                 }
                 else
                     e->failed = true;

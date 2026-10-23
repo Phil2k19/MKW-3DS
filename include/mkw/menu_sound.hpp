@@ -17,7 +17,13 @@ public:
  // Every menu frame (60 Hz): the page on screen drives sections and layers.
  // steps: 60 Hz game frames since the last call; fades and the audio thread's
  // per-frame updates advance once per step (retail calls once per frame).
- void frame(const MenuState& visual, bool revealed, unsigned steps);
+ // pageState: the visual page's retail state, 3 = In (entering), 4 = active,
+ // 5 = Out. incoming: the page a finished exit waits for (the new scene is
+ // created after the fade-out: its sound group loads behind the black screen).
+ void frame(const MenuState& visual, bool revealed, unsigned steps, int pageState = 4, const MenuState* incoming = nullptr);
+ // Whether the page may appear: a new section's BGM group is resident (retail
+ // starts that BGM when the group load completes, on the fade-in's first frame).
+ bool ready(UiPage page) const;
  // The race takes over (RaceRSARPlayer); menus resume with frame().
  void leave();
  // A section change's screen fade-out has started (MenuRSARPlayer::Stop,
@@ -29,7 +35,11 @@ public:
  // Retail EGG::AudioTrack: a value that moves linearly to a target over frames.
  struct Track {
   float value = 1, target = 1, step = 0; int frames = 0;
-  void set(float to, int over) { if (to == value && frames == 0) return; target = to; frames = over; if (!over) value = to; else step = (value - to) / float(over); }
+  // PAL 0x80213E5C: nothing when the value already is the target.
+  void set(float to, int over) { if (to == value) return; target = to; frames = over; if (!over) value = to; else step = (value - to) / float(over); }
+  // SinglePlayerValuesMgr::SetVolume (PAL 0x806F9E78): a value equal to the
+  // target first moves up by 0.01 (0x808A1098), then the track is set.
+  void setVolume(float to, int over) { if (to == value) value += 0.01f; set(to, over); }
   bool calc() { if (!frames) return false; if (--frames == 0) value = target; else value -= step; return true; }
  };
  enum class Section : std::uint8_t { None, Title, Single, Race };
@@ -38,10 +48,19 @@ public:
  static int layerOf(UiPage page);
 private:
  void enterSection(Section section, const MenuState& visual);
- void startBgm(UiPage page);
- void applyLayer(int layer, int frames);
+ void startBgm();
+ void pageLayer(UiPage page, int state);
  Section section_ = Section::None, loaded_ = Section::None;
- int pendingStart_ = -1, layer_ = 6;
+ int pendingStart_ = -1;
+ // MenuRSARPlayer +4: the last page whose layer OnNewPageLayer applied in this
+ // section (a new player leaves it unset); StartSound picks the stems from it.
+ UiPage layerPage_ = UiPage::Strap; bool layerPageSet_ = false;
+ // The visual page and state OnNewPageLayer last saw (Section_calcActivation
+ // calls it only when the top page's state changes).
+ UiPage statePage_ = UiPage::Strap; int pageState_ = 0;
+ // 60 Hz frames a section's group has been loading (ready() stops holding the
+ // page after SceneWaitLimit, so a failing load never blocks the menus).
+ unsigned sceneWait_ = 0;
  std::uint32_t bgm_ = 0xFFFFFFFF;
  std::uint16_t slot_ = 1;            // alternates 1/2 like SinglePlayer's two handles
  Track volume_, stems_[4]; float postedVolume_ = -1;

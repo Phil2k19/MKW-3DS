@@ -157,15 +157,27 @@ void MenuSound::input(const MenuState& before, const MenuState& after, const UiI
  if (!pageChanged && before.cursor != after.cursor && sectionOf(after.page) != Section::None && after.page != UiPage::Title) ui(id::SE_UI_BTN_IN);
 }
 
-void MenuSound::applyLayer(int layer, int frames) {
- // MenuRSARPlayer::OnNewPageLayer (8070c8d0): layers 0-3 restore BGM volume
- // (1.0) and change stems over 30 frames; layer 5 ducks to 0.55.
- if (layer == 6) return;
- volume_.set(layer == 5 ? 0.55f : 1.0f, frames);
- if (bgm_ == id::SEQ_O_SELECT && layer <= 2) for (int t = 0; t < 4; ++t) stems_[t].set(SelectStems[layer][t], frames);
+void MenuSound::pageLayer(UiPage page, int state) {
+ // MenuRSARPlayer::OnNewPageLayer (PAL 0x80714374), called by
+ // Section_calcActivation (PAL 0x80623068) when the top page changes state.
+ // SetVolume needs a BGM handle (ValuesMgr +0xB8, PAL 0x806F9E78) and
+ // ChangeStream a playing SEQ_O_SELECT (StreamsMgr, PAL 0x806FAB2C); +4 is
+ // stored either way.
+ auto volume = [&](float v) { if (bgm_ != 0xFFFFFFFF) volume_.setVolume(v, 0x1e); };
+ auto stream = [&](int layer) { if (bgm_ == id::SEQ_O_SELECT) for (int t = 0; t < 4; ++t) stems_[t].set(SelectStems[layer][t], 0x1e); };
+ switch (layerOf(page)) {
+ case 0: if (state == 3) { volume(1.0f); stream(0); layerPage_ = page; layerPageSet_ = true; } break;
+ case 1: if (state == 3 || state == 4) { volume(1.0f); stream(1); layerPage_ = page; layerPageSet_ = true; } break;
+ case 2:
+  if (state == 3) { volume(1.0f); stream(2); layerPage_ = page; layerPageSet_ = true; }
+  if (state == 3 || state == 4) volume(1.0f);
+  break;
+ case 5: if (state == 3) volume(0.55f); break;
+ default: break;
+ }
 }
 
-void MenuSound::startBgm(UiPage page) {
+void MenuSound::startBgm() {
  // MenuRSARPlayer::OnLoad (PAL 0x80715BD4) first sets every sound player but
  // the UI's (1) back to full volume (PlayersVolumeMgr, PAL 0x8070F554, table
  // 0x808A1D48 = 1.0): a race's fade-out (RaceSound::fadeOut) leaves players
@@ -178,18 +190,21 @@ void MenuSound::startBgm(UiPage page) {
  SoundSystem::instance().play(sound, slot_);
  // SinglePlayer::PlaySound (PAL 0x806F8C30): W_BGM_TITLE arms the title voice, 60 frames out (0x80868780).
  if (sound == id::W_BGM_TITLE) { title_.armed = true; title_.delay = 0x3c; }
- // SinglePlayer::StartSound (806f4180): PrepareStreams with the current layer's stems.
- const int layer = layerOf(page);
+ // SinglePlayer::StartSound (PAL 0x806F913C): PrepareStreams (0x806FA2AC) sets
+ // the stem values from Section_getSoundTrigger(RSAR player +4): table
+ // 0x808A0F00 for layer 1, 0x808A0F10 for layer 2, else 0x808A0EF0 (stem 0
+ // only). The section's new player has +4 unset until a page's In applies its
+ // layer, so a BGM starting with the fade-in plays stem 0 alone and the page's
+ // ChangeStream (pageLayer, the same frame) brings the others up over 30 frames.
  if (sound == id::SEQ_O_SELECT) {
-  const int l = layer == 1 || layer == 2 ? layer : 0;
-  for (int t = 0; t < 4; ++t) { stems_[t].value = stems_[t].target = SelectStems[l][t]; stems_[t].frames = 0; post(SoundCommand::TrackVolume, slot_, 1u << t, stems_[t].value); }
+  const int trigger = layerPageSet_ ? layerOf(layerPage_) : 6;
+  const int l = trigger == 1 || trigger == 2 ? trigger : 0;
+  for (int t = 0; t < 4; ++t) { stems_[t].value = SelectStems[l][t]; stems_[t].frames = 0; post(SoundCommand::TrackVolume, slot_, 1u << t, stems_[t].value); }
  }
- // The new RSAR player resets every track to 1.0 (PAL 0x80713E90), so the BGM
- // starts at full volume (OnLoad's SetVolume(1.0, 3, 10) changes nothing);
- // the main menu's layer then ducks it over 30 frames.
- volume_ = Track{}; postedVolume_ = -1;
- layer_ = layer;
- if (layer == 5) volume_.set(0.55f, 30);
+ // The new RSAR player reset every track to 1.0 (PAL 0x80713E90; enterSection),
+ // so the BGM starts at full volume; OnLoad's SetVolume(1.0, 3, 10) found no
+ // BGM handle. The page's OnNewPageLayer sets the layer volume (main menu 0.55).
+ postedVolume_ = -1;
 }
 
 void MenuSound::enterSection(Section next, const MenuState& visual) {
@@ -203,6 +218,13 @@ void MenuSound::enterSection(Section next, const MenuState& visual) {
  loadSections(groupOf(next), 0xFFFFFFFF, 400);
  loaded_ = next;
  pendingStart_ = next == Section::Title || next == Section::Single ? 1 : -1;
+ sceneWait_ = 0;
+ // The section's new RSAR player (PAL 0x80713E90): +4 unset, and the
+ // ValuesMgr/StreamsMgr tracks reset to 1.0 (fn_1_1E9A6C / fn_1_1EA1F8 -> EGG
+ // AudioTrack reset 0x80213E48: value 1.0, no ramp).
+ layerPageSet_ = false;
+ volume_.value = 1; volume_.frames = 0;
+ for (auto& s : stems_) { s.value = 1; s.frames = 0; }
  // TitlePage_onInit's variant (PAL 0x8063AB6C, drawn by MenuState::enter): the same one
  // picks the title picture and the blurred license/main-menu picture.
  if (next == Section::Title) {
@@ -254,27 +276,45 @@ void MenuSound::titleFrame(UiPage page) {
  }
 }
 
-void MenuSound::frame(const MenuState& visual, bool revealed, unsigned steps) {
+namespace { constexpr unsigned SceneWaitLimit = 180; }
+
+bool MenuSound::ready(UiPage page) const {
+ if (!SoundSystem::instance().available()) return true;
+ const Section s = sectionOf(page);
+ if (s != Section::Title && s != Section::Single) return true;
+ if (s != section_) return false;   // its scene (frame's incoming) is not created yet
+ return pendingStart_ <= 0 || sceneWait_ >= SceneWaitLimit || SoundSystem::instance().sceneReady();
+}
+
+void MenuSound::frame(const MenuState& visual, bool revealed, unsigned steps, int pageState, const MenuState* incoming) {
  auto& sound = SoundSystem::instance();
  if (!sound.available()) return;
- const Section next = sectionOf(visual.page);
- // After a race (engine restarted, no section) the menu groups load at once,
- // before the page's textures fill LINEAR: BNK_VO_MENU needs one 1.28 MB block
- // and failed to fit behind them (no menu voices). The BGM still waits for the page.
- if ((revealed || section_ == Section::None) && next != section_ && next != Section::Race) enterSection(next, visual);
- if (pendingStart_ > 0 && revealed && sound.sceneReady()) { pendingStart_ = -1; startBgm(visual.page); }
+ // The section's scene: retail creates it (new RSAR player, group load) right
+ // after the fade-out, while the screen is black; a finished exit's incoming
+ // page stands for it. After a race (engine restarted, no section) the menu
+ // groups load at once, before the page's textures fill LINEAR: BNK_VO_MENU
+ // needs one 1.28 MB block and failed to fit behind them (no menu voices).
+ const MenuState& scene = incoming ? *incoming : visual;
+ const Section next = sectionOf(scene.page);
+ if ((revealed || incoming || section_ == Section::None || section_ == Section::Race) && next != section_ && next != Section::Race) enterSection(next, scene);
+ // The group load's completion starts the BGM (fn_1_1EA250, PAL 0x806FA604 ->
+ // PlaySound(id, 0)) as the scene fades in: ready() holds the page until then,
+ // so this is the first frame the section's page is on screen.
+ if (pendingStart_ > 0 && revealed && sectionOf(visual.page) == section_ && sound.sceneReady()) { pendingStart_ = -1; startBgm(); }
  // TitlePage_onActivate (PAL 0x8063AD64), once each time the title page comes on screen.
  if (visual.page != UiPage::Title) title_.active = false;
  else if (section_ == Section::Title && !title_.active) { title_.active = true; titleActivate(); }
- const int layer = layerOf(visual.page);
- if (bgm_ != 0xFFFFFFFF && layer != layer_) { applyLayer(layer, 30); if (layer != 6) layer_ = layer; }
+ // Section_calcActivation (PAL 0x80623068): OnNewPageLayer when the top page's
+ // state changes. A page is not In before it is revealed.
+ if (revealed && (visual.page != statePage_ || pageState != pageState_)) { statePage_ = visual.page; pageState_ = pageState; pageLayer(visual.page, pageState); }
  // ConfirmPage BeforeIn / AfterOut (PAL 0x805C2324 / 0x805C2340): the page
  // layer's volume (track 3) to 0.55 over 30 frames while the popup shows,
- // back to 1.0 over 30 once it has gone.
+ // back to 1.0 over 30 once it has gone (SetVolume, PAL 0x806F9E78).
  const bool confirmPopup = visual.page == UiPage::NoGhosts;
- if (confirmPopup != confirmPopup_) { confirmPopup_ = confirmPopup; if (bgm_ != 0xFFFFFFFF) volume_.set(confirmPopup ? 0.55f : 1.0f, 30); }
+ if (confirmPopup != confirmPopup_) { confirmPopup_ = confirmPopup; if (bgm_ != 0xFFFFFFFF) volume_.setVolume(confirmPopup ? 0.55f : 1.0f, 30); }
  // StreamsMgr::Calc / SinglePlayerValuesMgr::Calc (806f54b8 / 806f4d24): per frame.
  for (unsigned step = 0; step < steps; ++step) {
+  if (pendingStart_ > 0) ++sceneWait_;
   popup_.calc();
   if (bgm_ != 0xFFFFFFFF) {
    volume_.calc();

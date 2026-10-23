@@ -195,7 +195,7 @@ index f35456b..a66f16f 100644
      ObjectCollisionConvexHull *m_hull;
      Kart::KartObject *m_kartObject;
 diff --git a/source/game/field/ObjectDirector.cc b/source/game/field/ObjectDirector.cc
-index edcbbda..6d46992 100644
+index edcbbda..092741f 100644
 --- a/source/game/field/ObjectDirector.cc
 +++ b/source/game/field/ObjectDirector.cc
 @@ -2,6 +2,7 @@
@@ -347,7 +347,7 @@ index edcbbda..6d46992 100644
          // rGV2's blocks are created outside of the factory function
          if (rGV2) {
              switch (static_cast<ObjectId>(pObj->id())) {
-@@ -254,9 +330,13 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
+@@ -254,9 +330,15 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
          return EGG::egg_new<ObjectHeyhoShip>(params);
      case ObjectId::KartTruck:
      case ObjectId::CarBody:
@@ -358,10 +358,12 @@ index edcbbda..6d46992 100644
          return EGG::egg_new<ObjectKoopaBall>(params);
 +    case ObjectId::KoopaFigure:
 +        return EGG::egg_new<ObjectKoopaFigure>(params);
++    case ObjectId::Karehayama:
++        return EGG::egg_new<ObjectKarehayama>(params);
      case ObjectId::W_Woodbox:
          return EGG::egg_new<ObjectWoodboxW>(params);
      case ObjectId::SunDS:
-@@ -375,6 +455,11 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
+@@ -375,6 +457,11 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
          return EGG::egg_new<ObjectEscalator>(params);
      case ObjectId::EscalatorGroup:
          return EGG::egg_new<ObjectEscalatorGroup>(params);
@@ -373,7 +375,7 @@ index edcbbda..6d46992 100644
  
      // Non-specified objects are stock collidable objects by default
      // However, we need to specify an impl, so we don't use default
-@@ -396,6 +481,10 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
+@@ -396,6 +483,10 @@ ObjectBase *ObjectDirector::createObject(const System::MapdataGeoObj &params) {
      case ObjectId::WLDokanGC:
      case ObjectId::Mdush:
          return EGG::egg_new<ObjectKCL>(params);
@@ -2823,7 +2825,7 @@ index 14ee3e8..8ae4845 100644
      f32 m_targetY;
  
 diff --git a/source/game/field/obj/ObjectId.hh b/source/game/field/obj/ObjectId.hh
-index e2bc0b5..dd07786 100644
+index e2bc0b5..b9c4685 100644
 --- a/source/game/field/obj/ObjectId.hh
 +++ b/source/game/field/obj/ObjectId.hh
 @@ -23,9 +23,11 @@ enum class ObjectId {
@@ -2846,7 +2848,7 @@ index e2bc0b5..dd07786 100644
      DokanSFC = 0x12e,
      CastleTree1c = 0x130,
      MarioTreeGCc = 0x134,
-@@ -45,15 +48,19 @@ enum class ObjectId {
+@@ -45,15 +48,20 @@ enum class ObjectId {
      Pylon = 0x144,
      PalmTree = 0x145,
      Parasol = 0x146,
@@ -2862,11 +2864,12 @@ index e2bc0b5..dd07786 100644
      ObakeBlock2SFCc = 0x16f,
      ObakeBlock3SFCc = 0x170,
 +    KoopaFigure = 0x171,
++    Karehayama = 0x176,
 +    StarRing = 0x17a,
      KoopaFigure64 = 0x18b,
      Kuribo = 0x191,
      Choropu = 0x192,
-@@ -92,6 +99,8 @@ enum class ObjectId {
+@@ -92,6 +100,8 @@ enum class ObjectId {
      Turibashi = 0x202,
      FlamePoleEff = 0x203,
      Aurora = 0x204,
@@ -3059,6 +3062,267 @@ index 6ff160b..06007ac 100644
 +};
 +
  } // namespace Kinoko::Field
+diff --git a/source/game/field/obj/ObjectKarehayama.cc b/source/game/field/obj/ObjectKarehayama.cc
+new file mode 100644
+index 0000000..6ebfaba
+--- /dev/null
++++ b/source/game/field/obj/ObjectKarehayama.cc
+@@ -0,0 +1,187 @@
++#include "ObjectKarehayama.hh"
++
++#include "game/field/ObjectDirector.hh"
++
++#include "game/item/ItemDirector.hh"
++
++#include "game/kart/KartObject.hh"
++
++#include "game/system/RaceConfig.hh"
++#include "game/system/RaceManager.hh"
++
++namespace Kinoko::Field {
++
++namespace {
++
++/// Breakable +0xb4 after every burst (0x808CE008).
++constexpr s32 RESPAWN_FRAMES = 138;
++/// One update of the init's fade at rate 100 (0x808A3B4C) rests it past its last frame.
++constexpr u32 ANIM_REST = 100;
++/// SE_CN_TRE_LEAF_FLY_UP, StartNewSoundLimited (fn_1_310188).
++constexpr u16 SE_LEAF_FLY_UP = 0x2e7;
++
++/// ObjectDirector +0x55: time trials and ghost races.
++bool timeTrial() {
++    return System::RaceConfig::Instance()->raceScenario().isTimeTrial();
++}
++
++} // namespace
++
++/// @addr{0x80766F4C}
++ObjectKarehayama::ObjectKarehayama(const System::MapdataGeoObj &params)
++    : ObjectBreakable(params), m_respawnTimer(0), m_burstCount(0), m_burstSpeed(0.0f),
++      m_scatterCount(0), m_animFrame(ANIM_REST) {}
++
++/// @addr{0x80766F88}
++ObjectKarehayama::~ObjectKarehayama() = default;
++
++/// @addr{0x80766FE0}
++/// @brief Breakable::init, then the fade at rate 100. The effects (vf+0xec, 0x80767038) and
++/// the sound actor are presentation.
++void ObjectKarehayama::init() {
++    ObjectBreakable::init();
++    m_animFrame = ANIM_REST;
++}
++
++/// @addr{0x8076ED1C}
++/// @brief Breakable::calc: a burst pile (state 2) waits out its timer, then respawns
++/// (vf+0xf4). State 3 calls vf+0xfc, empty here (0x807677E0).
++void ObjectKarehayama::calc() {
++    if (m_animFrame < ANIM_REST) {
++        ++m_animFrame;
++    }
++
++    if (m_state == 2 && m_respawnTimer > 0 && --m_respawnTimer == 0) {
++        respawn();
++    }
++}
++
++/// @addr{0x8076F0AC}
++/// @brief Breakable::onCollision: object reaction 3 calls vf+0x104 (0x8076734C), 5 vf+0x108
++/// (0x80767448). Retail's processKartReactions (0x8081F66C) turns the pile's 5 into 3 offline
++/// outside time trials, which Kinoko's does not: 5 takes the 3 path there. The kart keeps its
++/// reaction (none). Not ported: the rumble of +0xbc.
++Kart::Reaction ObjectKarehayama::onCollision(Kart::KartObject *kartObj,
++        Kart::Reaction reactionOnKart, Kart::Reaction reactionOnObj,
++        EGG::Vector3f & /*hitDepth*/) {
++    if (reactionOnObj == Kart::Reaction::UNK_3) {
++        burstByKart(kartObj, false);
++    } else if (reactionOnObj == Kart::Reaction::UNK_5) {
++        burstByKart(kartObj, timeTrial());
++    }
++
++    return reactionOnKart;
++}
++
++/// @addr{0x8076F1DC}
++/// @brief Breakable::onItemCollision: object reaction 3 calls vf+0x10c (0x8076757C), which
++/// drops an item for the item's owner (12 for none) along the negated hit depth; 5 calls
++/// vf+0x110 (0x80767648), which drops nothing. Both scatter the leaves (vf+0x11c), set the
++/// respawn timer and play SE_CN_TRE_LEAF_FLY_UP. A null item (onGlobalItemCollision)
++/// returns at once.
++s16 ObjectKarehayama::onItemCollision(const EGG::Vector3f & /*position*/,
++        const EGG::Vector3f & /*velocity*/, s16 reactionOnItem, s16 reactionOnObj,
++        EGG::Vector3f &hitDepth) {
++    if (reactionOnObj == 3) {
++        dropItem(ObjectDirector::Instance()->itemOwner(), -hitDepth);
++    } else if (reactionOnObj == 5) {
++        hide();
++    } else {
++        return reactionOnItem;
++    }
++
++    ++m_scatterCount;
++    m_respawnTimer = RESPAWN_FRAMES;
++    cueSound(SE_LEAF_FLY_UP, SoundCall::StartNew);
++
++    return reactionOnItem;
++}
++
++/// @addr{0x8076734C} @addr{0x80767448}
++/// @brief A kart's burst. Faster than 0.4 of its top speed it drops an item along its velocity
++/// (vf+0xf8); slower it only hides the pile. The time-trial path (0x80767448) never drops and
++/// ignores a ghost unless the race replays one. Then rk_karehayama with a speed set by the
++/// speed ratio and the sound (vf+0x118, 0x80767114), rk_karehayama0 (vf+0x11c) and the timer.
++void ObjectKarehayama::burstByKart(Kart::KartObject *kartObj, bool timeTrialPath) {
++    constexpr f32 DROP_SPEED_RATIO = 0.4f; // 0x808A3B58
++    constexpr f32 SPEED_MIN = 25.0f;       // 0x808CE010
++    constexpr f32 SPEED_MAX = 70.0f;       // 0x808CE00C
++
++    const u8 playerIdx = kartObj->param()->playerIdx();
++    if (timeTrialPath) {
++        // isGhost / RaceConfig::isTimeAttackReplay: Kinoko replays a time trial with the ghost
++        // as player 0.
++        const auto &scenario = System::RaceConfig::Instance()->raceScenario();
++        if (scenario.players[playerIdx].type == System::RaceConfig::Player::Type::Ghost &&
++                scenario.players[0].type != System::RaceConfig::Player::Type::Ghost) {
++            return;
++        }
++    }
++
++    const f32 ratio = kartObj->speedRatioCapped();
++    if (ratio <= DROP_SPEED_RATIO || timeTrialPath) {
++        hide();
++    } else {
++        dropItem(playerIdx, kartObj->velocity());
++    }
++
++    m_burstSpeed = SPEED_MIN + ratio * (SPEED_MAX - SPEED_MIN);
++    ++m_burstCount;
++    cueSound(SE_LEAF_FLY_UP, SoundCall::StartNew);
++
++    ++m_scatterCount;
++    m_respawnTimer = RESPAWN_FRAMES;
++}
++
++/// @addr{0x807672A4} @addr{0x8076EDE4}
++/// @brief vf+0xf8 turns the velocity by up to 5 degrees either way about world Y, then
++/// Breakable's item drop (as ObjectWoodbox::dropItem, without Woodbox's own respawn timer):
++/// with percentage setting 2, an item from ItemSlot row setting 1. It always ends hidden and
++/// intangible.
++void ObjectKarehayama::dropItem(u8 owner, const EGG::Vector3f &velocity) {
++    constexpr f32 YAW_RANGE = 10.0f;     // 0x808CE018 (degrees)
++    constexpr f32 DROP_HEIGHT = 300.0f;  // 0x808CF1AC
++
++    // RaceManager +0x4 offline (0x80782F74), one draw sequence for the turn and the drop.
++    auto &random = System::RaceManager::Instance()->random();
++    EGG::Matrix34f yaw;
++    yaw.setAxisRotation((random.getF32(YAW_RANGE) - YAW_RANGE * 0.5f) * DEG2RAD,
++            EGG::Vector3f::ey);
++    const EGG::Vector3f turned = yaw.ps_multVector(velocity);
++
++    // The chance is drawn even when nothing drops. Not ported: RaceConfig +0xB80 == 3 (no
++    // items) also stops the drop; the port has no such mode.
++    if (random.getF32(100.0f) < static_cast<f32>(static_cast<s16>(m_mapObj->setting(2)))) {
++        EGG::Vector3f vel = turned * 2.0f;
++        vel.y = 2.0f + random.getF32(1.0f);
++
++        calcRotLock();
++        EGG::Matrix34f mat;
++        mat.makeR(EGG::Vector3f(rot().x, 0.0f, 0.0f));
++        vel = mat.ps_multVector(vel);
++
++        // ItemSlotData::decideItem (0x807BB42C) then draws nextU32(sum of the row's weights)
++        // from the same random: drawn here, so the sequence never depends on the hook.
++        const u32 word = random.getU32();
++        Item::ItemDirector::CreateCourseDrop(m_mapObj->setting(1),
++                pos() + EGG::Vector3f(0.0f, DROP_HEIGHT, 0.0f), vel, owner, word);
++    }
++
++    hide();
++}
++
++/// @brief vf+0x68 (setVisible 0, model and shadow), state 2 and vf+0x90 (intangible).
++void ObjectKarehayama::hide() {
++    m_state = 2;
++    disableCollision();
++}
++
++/// @addr{0x80767250}
++/// @brief Breakable's enableCollision (state 1, tangible and shown again), then the fade-in
++/// and the shadow's rise restart at frame 0, rate 1 (0x808A3B48, 0x8055F1E4).
++void ObjectKarehayama::respawn() {
++    ObjectBreakable::enableCollision();
++    m_animFrame = 0;
++}
++
++} // namespace Kinoko::Field
+diff --git a/source/game/field/obj/ObjectKarehayama.hh b/source/game/field/obj/ObjectKarehayama.hh
+new file mode 100644
+index 0000000..a896977
+--- /dev/null
++++ b/source/game/field/obj/ObjectKarehayama.hh
+@@ -0,0 +1,62 @@
++#pragma once
++
++#include "game/field/obj/ObjectBreakable.hh"
++
++namespace Kinoko::Field {
++
++/// @brief Maple Treeway's leaf piles (karehayama, ObjFlow 0x176): a Breakable (vtable
++/// 0x808CE020, ctor 0x80766F4C). A kart or a shell bursts a pile, which may drop an item and
++/// comes back 138 frames later. The kart itself is unaffected (GeoHitTableKart reaction 0).
++class ObjectKarehayama : public ObjectBreakable {
++public:
++    ObjectKarehayama(const System::MapdataGeoObj &params);
++    ~ObjectKarehayama() override;
++
++    void init() override;
++    void calc() override;
++
++    Kart::Reaction onCollision(Kart::KartObject *kartObj, Kart::Reaction reactionOnKart,
++            Kart::Reaction reactionOnObj, EGG::Vector3f &hitDepth) override;
++    s16 onItemCollision(const EGG::Vector3f &position, const EGG::Vector3f &velocity,
++            s16 reactionOnItem, s16 reactionOnObj, EGG::Vector3f &hitDepth) override;
++
++    /// @addr{0x80767848}
++    void onObjectCollision(Kart::KartObject * /*kartObj*/) override {}
++
++    /// Presentation only: kart bursts so far; each starts rk_karehayama (vf+0x118, 0x80767114).
++    [[nodiscard]] u32 burstCount() const {
++        return m_burstCount;
++    }
++
++    /// Presentation only: the specific-direction speed (EGG::Effect vt+0x3c) the last kart
++    /// burst gave rk_karehayama.
++    [[nodiscard]] f32 burstSpeed() const {
++        return m_burstSpeed;
++    }
++
++    /// Presentation only: every burst so far; each starts rk_karehayama0 (vf+0x11c, 0x807671DC).
++    [[nodiscard]] u32 scatterCount() const {
++        return m_scatterCount;
++    }
++
++    /// Presentation only: the frame of the CLR0 fade-in "karehayama" and of the shadow's CHR0
++    /// "karehayama-shadow", both restarted at frame 0, rate 1 by each respawn (0x80767250). Init
++    /// plays the fade at rate 100 (0x80766FE0), so until the first respawn it rests past its end.
++    [[nodiscard]] u32 animFrame() const {
++        return m_animFrame;
++    }
++
++private:
++    void burstByKart(Kart::KartObject *kartObj, bool timeTrial);
++    void dropItem(u8 owner, const EGG::Vector3f &velocity);
++    void hide();
++    void respawn();
++
++    s32 m_respawnTimer; ///< Breakable +0xb4
++    u32 m_burstCount;
++    f32 m_burstSpeed;
++    u32 m_scatterCount;
++    u32 m_animFrame;
++};
++
++} // namespace Kinoko::Field
 diff --git a/source/game/field/obj/ObjectKoopaBall.cc b/source/game/field/obj/ObjectKoopaBall.cc
 index f951dc1..7c3579e 100644
 --- a/source/game/field/obj/ObjectKoopaBall.cc
@@ -4384,18 +4648,21 @@ index d6a185a..00c3f1b 100644
  private:
      enum State {
 diff --git a/source/game/field/obj/ObjectRegistry.hh b/source/game/field/obj/ObjectRegistry.hh
-index c206e01..fc1e2c5 100644
+index c206e01..780b2d0 100644
 --- a/source/game/field/obj/ObjectRegistry.hh
 +++ b/source/game/field/obj/ObjectRegistry.hh
-@@ -37,6 +37,7 @@
+@@ -35,8 +35,10 @@
+ #include "game/field/obj/ObjectHwanwan.hh"
+ #include "game/field/obj/ObjectItemboxLine.hh"
  #include "game/field/obj/ObjectKCL.hh"
++#include "game/field/obj/ObjectKarehayama.hh"
  #include "game/field/obj/ObjectKinoko.hh"
  #include "game/field/obj/ObjectKoopaBall.hh"
 +#include "game/field/obj/ObjectKoopaFigure.hh"
  #include "game/field/obj/ObjectKoopaFigure64.hh"
  #include "game/field/obj/ObjectKuribo.hh"
  #include "game/field/obj/ObjectNoImpl.hh"
-@@ -57,6 +58,8 @@
+@@ -57,6 +59,8 @@
  #include "game/field/obj/ObjectSanbo.hh"
  #include "game/field/obj/ObjectSandcone.hh"
  #include "game/field/obj/ObjectShip64.hh"

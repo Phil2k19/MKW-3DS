@@ -18,7 +18,8 @@ public:
  bool ready(const std::vector<UiQuad>& resident)const;
  // Pins the sets most recently requested at Urgent/Normal priority, publishes
  // completed loads and evicts unpinned LRU textures down to the budget.
- void update(Renderer&);
+ // Returns the LINEAR bytes retired (free again from the next frame).
+ std::uint32_t update(Renderer&);
  // Movie streams for the visible quads: opens/closes streams, selects rows
  // and the frame for this clock. Never blocks.
  void streamMovies(const std::vector<UiQuad>& quads,std::uint64_t elapsed60HzTicks);

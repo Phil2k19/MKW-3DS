@@ -27,6 +27,7 @@
 #include <game/field/obj/ObjectHeyho.hh>
 #include <game/field/obj/ObjectHeyhoBall.hh>
 #include <game/field/obj/ObjectItemboxPress.hh>
+#include <game/field/obj/ObjectKarehayama.hh>
 #include <game/field/RailManager.hh>
 #include <game/field/obj/ObjectKoopaBall.hh>
 #include <game/field/obj/ObjectKoopaFigure.hh>
@@ -778,6 +779,27 @@ void drawWoodbox(ObjectDraw& d,Visual& v){
     if(!static_cast<const K::Field::ObjectBreakable*>(v.object)->shown())return;
     d.submit(v.main.model,liveMatrix(*v.object),{});
 }
+// Maple Treeway's leaf piles (Kinoko ObjectKarehayama, retail vtable 0x808CE020): hidden with
+// their shadow while burst (setVisible 0x808216C0). The CLR0 fade-in "karehayama" and the
+// shadow's CHR0 "karehayama-shadow" (its volume rising out of the ground) play from each
+// respawn; until the first one both rest on their last frame.
+void drawKarehayama(ObjectDraw& d,Visual& v){
+    const auto& o=*static_cast<const K::Field::ObjectKarehayama*>(v.object);
+    if(!o.shown())return;
+    const float frame=float(o.animFrame());
+    const C3D_Mtx m=liveMatrix(o);
+    Anim a;a.clr=v.main.clr;a.clrFrame=frame;
+    d.submit(v.main.model,m,a);
+    if(!v.shadow.model)return;
+    // The shadow is a rigid one-joint volume drawn in joint space: place it by its pose.
+    C3D_Mtx joint,posed;Mtx_Identity(&joint);
+    if(v.shadow.clip>=0&&v.shadow.model->bank&&v.shadow.model->bank->matrixCount()==1){
+        float p[12];v.shadow.model->bank->pose(v.shadow.clip,frame,p);
+        for(unsigned row=0;row<3;++row)for(unsigned col=0;col<4;++col)joint.r[row].c[3-col]=p[row*4+col];
+    }
+    Mtx_Multiply(&posed,&m,&joint);
+    d.shadow(v.shadow.model,posed);
+}
 // Delfino Square's drawbridge (RMCP ObjectTownBridge::calc 80809774): Kinoko
 // tilts the object by the bridge angle (rot z) and retail stops its CHR0 on
 // frame 89|angle|/45 (clamped 0..89) of that same angle; its SRT0 plays at
@@ -912,6 +934,8 @@ bool classifyObject(Visual& v,const ObjectAssets& assets,int course){
     }else if(id==ObjectId::Woodbox&&live){
         v.present=drawWoodbox;v.main=find(assets,"woodbox",static_cast<const K::Field::ObjectWoodbox*>(v.object)->getKclName());
         v.low=v.shadow={};
+    }else if(id==ObjectId::Karehayama&&live){
+        v.present=drawKarehayama;v.low={};
     }else if(id==ObjectId::TownBridge&&live){
         v.present=drawTownBridge;
     }else if((id==ObjectId::ObakeBlockSFCc||id==ObjectId::ObakeBlock2SFCc||id==ObjectId::ObakeBlock3SFCc)&&live){

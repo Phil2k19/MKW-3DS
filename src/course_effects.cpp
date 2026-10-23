@@ -13,6 +13,7 @@
 #include <game/field/RailManager.hh>
 #include <game/field/obj/ObjectFlamePoleV.hh>
 #include <game/field/obj/ObjectHanachan.hh>
+#include <game/field/obj/ObjectKarehayama.hh>
 #include <game/field/obj/ObjectKoopaFigure.hh>
 #include <game/field/obj/ObjectKoopaFigure64.hh>
 #include <game/field/obj/ObjectPropeller.hh>
@@ -97,6 +98,7 @@ constexpr ArchiveUse Archives[]={
     {0x0d3,"rk_woodbox"},    // W_Woodbox's crates
     {0x171,"rk_koopaball"},  // koopaFigure: rk_koopaBallS, rk_koopaBall (ctor 0x80771FB0)
     {0x0e2,"rk_hana"},       // hanachan: rk_hanaSmk (hop 0x806C72B8)
+    {0x176,"rk_karehayama"}, // karehayama: rk_karehayama(S), rk_karehayama0(S) (0x80767038)
 };
 constexpr uint16_t DonkyCannonGC=0x259,TreeCannon=0x261;
 
@@ -181,7 +183,7 @@ uint16_t chrFrames(const char* name){
     return be16(d+chr+0x20);
 }
 
-enum class Kind:uint8_t{Pole,Statue,Propeller,Ball,Cannon,Crate,Figure,Wiggler};
+enum class Kind:uint8_t{Pole,Statue,Propeller,Ball,Cannon,Crate,Figure,Wiggler,Leaves};
 struct Handle{ef::Effect* effect=nullptr;uint16_t serial=0;};
 struct Tracked {
     Kind kind;
@@ -189,7 +191,8 @@ struct Tracked {
     const K::System::MapdataGeoObj* geo=nullptr;
     Clip clip;
     std::array<Handle,3> fx{};
-    uint32_t count=0;      // crate: breaks seen; Bowser's statue: mouth openings seen; Wiggler: landed
+    uint32_t count=0;      // crate: breaks seen; Bowser's statue: mouth openings seen; Wiggler: landed; leaves: scatters seen
+    uint32_t bursts=0;     // leaves: kart bursts seen
     bool hidden=false;     // ball: +0xf8, the clip result its calc stored a step before
     Vec3 start{};          // ball: its rail's first point (init 0x806E2C4C)
     int64_t shot=-1;       // cannon: the timer of the last shot start
@@ -214,7 +217,8 @@ struct CourseEffects::Impl {
     unsigned baseEmitters=0,baseTextures=0,textureCount=0;
     struct Ids{int flamePole=-1,flamePoleS=-1,flamePoleL=-1,koopaFire=-1,koopaFireL=-1,volcErupt=-1,volcBrk=-1,
                volcTail=-1,volcTailS=-1,volcFire=-1,volcFireS=-1,epropeller=-1,epropellerS=-1,dkCannon=-1,
-               woodbox=-1,koopaBall=-1,koopaBallS=-1,hanaSmk=-1;} ids;
+               woodbox=-1,koopaBall=-1,koopaBallS=-1,hanaSmk=-1,karehayama=-1,karehayamaS=-1,karehayama0=-1,
+               karehayama0S=-1;} ids;
     std::vector<Tracked> objects;
     unsigned generation=~0u;
     bool cannonStart=false,lookBack=false;
@@ -330,7 +334,8 @@ bool CourseEffects::load(RaceEffects& effects,Texture* textures,unsigned capacit
     m.ids={find("rk_flamePole"),find("rk_flamePoleS"),find("rk_flamePoleL"),find("rk_koopaFire"),find("rk_koopaFireL"),
            find("rk_volcErupt"),find("rk_volcBrk"),find("rk_volcTail"),find("rk_volcTailS"),find("rk_volcFire_L"),
            find("rk_volcFire_LS"),find("rk_epropeller"),find("rk_epropellerS"),find("rk_dkCannon"),
-           find("rk_woodbox"),find("rk_koopaBall"),find("rk_koopaBallS"),find("rk_hanaSmk")};
+           find("rk_woodbox"),find("rk_koopaBall"),find("rk_koopaBallS"),find("rk_hanaSmk"),find("rk_karehayama"),
+           find("rk_karehayamaS"),find("rk_karehayama0"),find("rk_karehayama0S")};
     std::snprintf(m.summary,sizeof m.summary,"course fx %s: %u archives (%u refused), %u emitters, %u textures (%u missing)",folder.c_str(),
                   unsigned(keys.size()),refused,unsigned(effects.system().resources.size()-m.baseEmitters),m.textureCount,missing);
     return !refused&&!missing;
@@ -365,6 +370,9 @@ void CourseEffects::Impl::rebuild(){
         // W_Woodbox's spawner has no collision (0x8077ECD0); its crates do.
         else if(obj->id()==ObjectId::Woodbox||(obj->id()==ObjectId::W_Woodbox&&static_cast<const K::Field::ObjectCollidable*>(obj)->collision())){
             t.kind=Kind::Crate;t.count=static_cast<const K::Field::ObjectWoodbox*>(obj)->breakCount();
+        }else if(obj->id()==ObjectId::Karehayama){
+            const auto& o=*static_cast<const K::Field::ObjectKarehayama*>(obj);
+            t.kind=Kind::Leaves;t.count=o.scatterCount();t.bursts=o.burstCount();
         }else if(obj->id()==ObjectId::KoopaFigure){
             t.kind=Kind::Figure;t.count=static_cast<const K::Field::ObjectKoopaFigure*>(obj)->vomitCount();
         }else if(obj->id()==ObjectId::VolcanoBall){
@@ -559,6 +567,27 @@ void CourseEffects::Impl::stepObject(ef::System& s,Tracked& t,uint32_t timer,uns
         if(culled)break;
         create(s,t.fx[0],screens<=1?ids.koopaBallS:ids.koopaBall);
         move(s,t.fx[0],at(o.transform(),vec(o.pos()),1));
+        break;
+    }
+    case Kind::Leaves:{
+        // Maple Treeway's leaf piles, never culled. A kart's burst (vf+0x118, 0x80767114)
+        // creates rk_karehayama, sets its specific-direction speed (EGG::Effect vt+0x3c) to
+        // 25 + 45 x the kart's speed ratio and puts it on the pile's matrix; every burst then
+        // does the same with rk_karehayama0 (vf+0x11c, 0x807671DC). One handle each, created
+        // unless still running. One screen uses these, more the S variants (0x80767038).
+        const auto& o=*static_cast<const K::Field::ObjectKarehayama*>(t.object);
+        const ef::Mtx34 m=at(o.transform(),vec(o.pos()),1);
+        if(o.burstCount()!=t.bursts){
+            t.bursts=o.burstCount();
+            create(s,t.fx[0],screens<2?ids.karehayama:ids.karehayamaS);
+            if(alive(s,t.fx[0]))s.setSpecificVelocity(*t.fx[0].effect,o.burstSpeed());
+            move(s,t.fx[0],m);
+        }
+        if(o.scatterCount()!=t.count){
+            t.count=o.scatterCount();
+            create(s,t.fx[1],screens<2?ids.karehayama0:ids.karehayama0S);
+            move(s,t.fx[1],m);
+        }
         break;
     }
     }

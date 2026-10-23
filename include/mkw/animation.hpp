@@ -9,7 +9,8 @@ namespace mkw {
 class DriverAnimation {
 public:
     ~DriverAnimation(){reset();}
-    bool load(const char* path,const Model& model);
+    // keepClips > 0 (menu.pak banks): only the first keepClips skin clips.
+    bool load(const char* path,const Model& model,unsigned keepClips=0);
     void reset();
     // Whether the loaded bank sits in LINEAR (allocateBank) rather than the heap.
     bool inLinear() const {return data_&&dataLinear_;}

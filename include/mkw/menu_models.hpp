@@ -22,7 +22,8 @@ public:
     bool ready(const MenuState&) const;
     // Publishes finished loads, chooses the displayed models for this
     // visual state and evicts least-recently-used cache entries.
-    void update(Renderer&, const MenuState& visual);
+    // freeing: LINEAR bytes the texture cache retired this frame (back next frame).
+    void update(Renderer&, const MenuState& visual, std::uint32_t freeing = 0);
     // Synchronous load of everything the state shows (QA captures).
     void prepare(Renderer&, const MenuState&);
     void advance(unsigned ticks){backgroundFrame_+=ticks;driverFrame_+=ticks;kartTicks_+=ticks;winkTicks_+=ticks;}

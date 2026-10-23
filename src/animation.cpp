@@ -77,14 +77,40 @@ bool DriverAnimation::prepareLitSkinning(Model& model){
 }
 int DriverAnimation::find(const char* name)const{if(name)for(unsigned i=0;i<count_;++i)if(!std::strcmp(name,clips_[i].name))return i;return -1;}
 int DriverAnimation::face(const char* name)const{if(name)for(unsigned i=0;i<faceCount_;++i)if(!std::strcmp(name,faces_[i].name))return i;return -1;}
-bool DriverAnimation::load(const char* path,const Model& model){
+bool DriverAnimation::load(const char* path,const Model& model,unsigned keepClips){
     reset();
     // Menu banks come from the open menu.pak; other banks are loose files.
     bool ok=false;size_t size=0;
     if(const long packed=pack::size(path);packed>=0){
         size=size_t(packed);if(size<28||size>12*1024*1024)return false;
-        data_=allocateBank(size,dataLinear_);if(!data_)return false;
-        ok=pack::readInto(path,data_,size);
+        // keepClips: only the first skin clips (a menu driver's sel_gut and
+        // sel_wait) plus every section after the skin clips, read as two ranges;
+        // the clip count in the copied header becomes keepClips.
+        size_t prefix=size,tail=size;
+        if(keepClips){
+            auto u32=[](const uint8_t* p){uint32_t v;std::memcpy(&v,p,4);return v;};
+            uint8_t h[32];
+            if(size>=32&&pack::readRange(path,0,h,32)&&!std::memcmp(h,"DSKM",4)&&u32(h+4)>=2&&u32(h+4)<=5&&!(u32(h+4)==5&&int32_t(u32(h+28))==-1)&&keepClips<u32(h+16)){
+                const uint64_t matrices=u32(h+12),shapes=u32(h+20);
+                uint64_t at=(u32(h+4)==5?32:28)+uint64_t(u32(h+8))*sizeof(SourceVertex)+shapes*sizeof(Range);
+                bool walked=true;
+                for(unsigned i=0;i<u32(h+16);++i){
+                    uint8_t c[44];
+                    if(at+44>size||!pack::readRange(path,size_t(at),c,44)){walked=false;break;}
+                    at+=44+uint64_t(u32(c+40))*(matrices*84+shapes*4);
+                    if(at>size){walked=false;break;}
+                    if(i+1==keepClips)prefix=size_t(at);
+                }
+                if(walked&&prefix<size)tail=size_t(at);else prefix=size;
+            }
+        }
+        const size_t bytes=prefix+(size-tail);
+        data_=allocateBank(bytes,dataLinear_);if(!data_)return false;
+        if(prefix==size)ok=pack::readInto(path,data_,size);
+        else{
+            ok=pack::readRange(path,0,data_,prefix)&&pack::readRange(path,tail,data_+prefix,size-tail);
+            const uint32_t count=keepClips;std::memcpy(data_+16,&count,4);size=bytes;
+        }
     }else{
         FILE* f=std::fopen(path,"rb");if(!f)return false;std::fseek(f,0,SEEK_END);long length=std::ftell(f);std::rewind(f);
         if(length<0){std::fclose(f);return false;}size=size_t(length);

@@ -1096,7 +1096,8 @@ int main()
             else
                 incomingKeyed = false;
             const bool texturesReady = menuRenderer.ready(incomingResident), modelsReady = menuModels.ready(menu), iconsReady = menuIcons.ready(mkw::MenuVehicleIcons::driverFor(menu));
-            const bool incomingReady = !transition.exiting() || (texturesReady && modelsReady && iconsReady);
+            // A new section's page also waits for its BGM group (MenuSound::ready).
+            const bool incomingReady = !transition.exiting() || (texturesReady && modelsReady && iconsReady && menuSound.ready(menu.page));
             if (transition.holding() && menuProfile->enabled() && ++heldFrames % 30 == 0)
             {
                 snprintf(line, sizeof line, "hold page=%u frames=%u textures=%d(pending %u) models=%d icons=%d queue=%u", unsigned(menu.page), heldFrames, int(texturesReady), menuRenderer.loadsPending(), int(modelsReady), int(iconsReady), loader.pending());
@@ -1166,18 +1167,41 @@ int main()
                     // texts and models load in this order, ahead of the next and
                     // previous pages (accept, back).
                     const mkw::UiInput moves[] = {{false, false, true}, {false, false, false, true}, {true}, {false, true}, {false, false, false, false, true}, {false, false, false, false, false, true}};
-                    for (const auto &move : moves)
+                    auto addPrefetch = [&](const mkw::MenuState &next)
                     {
-                        auto next = menu;
-                        const auto result = next.input(move);
-                        if (result != mkw::UiAction::None || next.unavailable)
-                            continue;
-                        if (next.page == menu.page && next.cursor == menu.cursor)
-                            continue;
+                        if (next.unavailable || (next.page == menu.page && next.cursor == menu.cursor))
+                            return;
                         if (std::any_of(prefetchStates.begin(), prefetchStates.end(), [&](const mkw::MenuState &known)
                                         { return known.page == next.page && known.cursor == next.cursor; }))
-                            continue;
+                            return;
                         prefetchStates.push_back(next);
+                    };
+                    for (unsigned m = 0; m < std::size(moves); ++m)
+                    {
+                        auto next = menu;
+                        if (next.input(moves[m]) == mkw::UiAction::None)
+                            addPrefetch(next);
+                        if (m != 3)
+                            continue;
+                        // Retail keeps every menu driver resident (DriverModelMgr ctor, PAL
+                        // 0x80830180) and loads the hovered character's karts on hover
+                        // (fn_1_E5358, PAL 0x805F570C): also warm the characters two steps
+                        // away and, breadth-first, every machine of the vehicle page.
+                        if (menu.page == mkw::UiPage::Character)
+                            for (unsigned d = 0; d < 4; ++d)
+                            {
+                                auto two = menu;
+                                if (two.input(moves[d]) == mkw::UiAction::None && two.input(moves[d]) == mkw::UiAction::None)
+                                    addPrefetch(two);
+                            }
+                        else if (menu.page == mkw::UiPage::Vehicle)
+                            for (size_t i = 0; i < prefetchStates.size() && prefetchStates.size() < 16; ++i)
+                                for (unsigned d = 0; d < 4 && prefetchStates[i].page == menu.page; ++d)
+                                {
+                                    auto further = prefetchStates[i];
+                                    if (further.input(moves[d]) == mkw::UiAction::None)
+                                        addPrefetch(further);
+                                }
                     }
                 }
                 // One neighbour at a time, composed on the second core; without
@@ -1216,21 +1240,22 @@ int main()
                 if (stable >= 30 && menu.page == mkw::UiPage::Character && menu.characterDriver(menu.cursor) < 24)
                     menuIcons.request(int(menu.characterDriver(menu.cursor)), mkw::AssetPriority::Prefetch);
             }
-            menuRenderer.update(renderer);
-            menuModels.update(renderer, visual);
+            const std::uint32_t texturesRetiring = menuRenderer.update(renderer);
+            menuModels.update(renderer, visual, texturesRetiring);
             menuIcons.update(renderer, visual);
             if (menuProfile->enabled())
                 loader.drainSlow([](const char *label, const char *detail, float run, float wait, void *profile)
                                  {char text[256];snprintf(text,sizeof text,"slow job %.1f ms (queued %.1f ms): %s %s",run,wait,label,detail);static_cast<mkw::MenuProfile*>(profile)->event(text); }, menuProfile.get());
             menuProfile->mark(MenuStage::Resident);
             if (!revealed)
-                revealed = menuRenderer.ready(visualResident) && menuModels.ready(visual) && menuIcons.ready(mkw::MenuVehicleIcons::driverFor(visual));
+                revealed = menuRenderer.ready(visualResident) && menuModels.ready(visual) && menuIcons.ready(mkw::MenuVehicleIcons::driverFor(visual)) && menuSound.ready(visual.page);
             menuProfile->mark(MenuStage::Textures);
             // The engine plays the title wave (W_BGM_TITLE) and every other menu sound;
             // the THP opening keeps its own stream. The cooked title WAV remains the
             // fallback when the sound archive is missing.
             const bool engineAudio = mkw::SoundSystem::instance().available();
-            menuSound.frame(visual, revealed, audioTicks);
+            // Retail page states for OnNewPageLayer: 3 In, 4 active, 5 Out.
+            menuSound.frame(visual, revealed, audioTicks, motion.active ? (motion.entering ? 3 : 5) : 4, transition.holding() ? &menu : nullptr);
             // QA: sound engine health as profiler events (in memory; written at the end).
             if (menuProfile->enabled() && engineAudio)
             {
@@ -2193,6 +2218,7 @@ int main()
         raceGrid.setSession(session);
         // ItemSlot.bin tables (fn_1_2AAB94): a Grand Prix reads 0/1, VS 2/3.
         raceItems->setGrandPrix(gp);
+        raceHud.grandPrix = gp;
         // RaceGlobals_init (PAL 0x807BD1D0): the item manager's Time Trial flag from RaceConfig
         // +0xB70, which configure() sets to Time_Trial exactly when timeTrial is set.
         raceItems->setTimeTrial(timeTrial);

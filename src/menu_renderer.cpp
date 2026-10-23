@@ -103,7 +103,7 @@ bool MenuRenderer::ready(const std::vector<UiQuad>& resident)const{
  for(unsigned i=0;i<streams.size();++i)if(streams[i]&&s.movies[i]&&!s.movies[i]->ready()&&!s.movies[i]->failed())return false;
  return true;
 }
-void MenuRenderer::update(Renderer& renderer){
+std::uint32_t MenuRenderer::update(Renderer& renderer){
  auto& s=*impl_;
  s.pinned=s.pinning;s.pinning.reset();s.streamsPinned=s.streamsPinning;s.streamsPinning.fill(false);
  // Texture::load fails when LINEAR has no contiguous block for it. Only a
@@ -134,6 +134,7 @@ void MenuRenderer::update(Renderer& renderer){
  while((flush||linearSpaceFree()+retiring<LinearReserve+incoming)&&evict(true)){}
  for(unsigned i=0;i<s.movies.size();++i)if(s.movies[i]&&!s.streamsPinned[i])renderer.retire(std::move(s.movies[i]));
  ++s.frame;
+ return retiring;
 }
 void MenuRenderer::streamMovies(const std::vector<UiQuad>& quads,std::uint64_t ticks){
  auto& s=*impl_;

@@ -440,8 +440,20 @@ struct Engine::Impl {
 
  Impl() { for (auto& o : hwOwner) o = -1; }
 
- // VoiceManager list order: ascending priority, oldest first among equals.
- bool voiceLess(const Voice& a, const Voice& b) const { return a.priority != b.priority ? a.priority < b.priority : a.order < b.order; }
+ // VoiceManager list order: ascending priority, oldest first among equals. Port: among equal
+ // priorities a quieter voice (6 dB bands of its mix volume, with the envelope once released)
+ // comes first, then the older. Retail mixes 96 AX voices (__AXVPBInit 0x80127B00) and seldom
+ // steals; with 24 NDSP voices a steal is routine, and oldest-first cut a full-volume one-shot
+ // such as SE_ITM_THNDR_USE within 8-16 frames while far 3D loops were re-noted after it.
+ static int voiceLevel(const Voice& v) {
+  const f32 x = v.priority == VoicePriorityRelease ? v.volume * v.veTarget : v.volume;
+  return x >= 0.5f ? 3 : x >= 0.25f ? 2 : x >= 0.125f ? 1 : 0;
+ }
+ bool voiceLess(const Voice& a, const Voice& b) const {
+  if (a.priority != b.priority) return a.priority < b.priority;
+  const int la = voiceLevel(a), lb = voiceLevel(b);
+  return la != lb ? la < lb : a.order < b.order;
+ }
  Voice* lowestVoice(Voice* except = nullptr) {
   Voice* best = nullptr;
   for (auto& v : voices) if (v.active && &v != except && (!best || voiceLess(v, *best))) best = &v;
@@ -470,9 +482,10 @@ struct Engine::Impl {
  // AxVoiceManager-style steal of one hardware voice for `priority`.
  int stealHw(int priority, Voice* requester) {
   // AX first drops voices already in release (AX priority MAX/2), then the
-  // lowest NW4R priority, oldest first. Streams (255) are never taken.
+  // lowest NW4R priority, oldest first (port: quieter first, voiceLess). Streams (255) are
+  // never taken.
   Voice* victim = nullptr;
-  for (auto& v : voices) if (v.active && &v != requester && v.priority == VoicePriorityRelease && v.channels > 0 && (!victim || v.order < victim->order)) victim = &v;
+  for (auto& v : voices) if (v.active && &v != requester && v.priority == VoicePriorityRelease && v.channels > 0 && (!victim || voiceLess(v, *victim))) victim = &v;
   if (!victim) {
    for (auto& v : voices) if (v.active && &v != requester && v.channels > 0 && v.priority < VoicePriorityMax && v.priority <= priority && (!victim || voiceLess(v, *victim))) victim = &v;
   }

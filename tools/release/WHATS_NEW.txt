@@ -1,16 +1,16 @@
 ThePhilosophicalOne fork (in progress)
 REBUILD NEEDED: new game files
-Title screen: retail pictures
-Pause: Classic Controller diagram,
-  retail captions, GP quit window
-Blooper ink, Bob-omb fuse, POW,
-  Thunder Cloud flash, Mushroom shine
-Mushrooms from Goombas visible
-Lightning flattens Goombas; it and
-  POW shake Wiggler
-Animated course textures and skies
-Retail lava and shiny materials
-Object sounds: cannons, crabs,
-  Wiggler, Pokey, Cataquacks
-Builder: courses convert again when
-  you rebuild in the same folder
+Menus load faster; character and
+  vehicle switching is instant
+Menu music: retail start and layers
+Title screen + pause: retail art,
+  Classic Controller diagram
+Blooper, Bob-omb, POW, Thunder Cloud
+  and Mushroom animations
+Animated course textures and skies,
+  retail lava and shiny materials
+Maple Treeway leaf piles burst
+Lightning thunder no longer cut off
+Name balloons: retail timing
+Wario Bike handlebar fixed
+New object sounds; Goomba Mushrooms

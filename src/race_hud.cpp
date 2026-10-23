@@ -1103,8 +1103,12 @@ void RaceHud::drawOverlay(Renderer& renderer,const RaceItems& items,unsigned sta
     // 5:3: retain uniform glyph scaling and each corner's source safe margin.
     // Name balloons. Retail anchors kart pos + (0,120,0) (static init 0x807ea268),
     // keeps up to three racers in front within 7500 units and on screen, replaces
-    // the farthest, and fades each pane 30 frames. Before GO (timer > 180) the
-    // player's own balloon shows; during the race others from timer 420.
+    // the farthest, and fades each pane 30 frames. Before GO (BalloonManager_calc
+    // 0x807F132C) only the player's own balloon, while RaceInfo_getCountdown
+    // (0x80533090: 240 - timer) is above 180: the intro around the kart and the
+    // countdown's first 60 frames; during the race others from timer 420. A Grand
+    // Prix shows none (CtrlRaceNameBalloon_calcSelf 0x807F06E8 hides the control
+    // while RaceConfig +0xB70 is 0).
     {
         auto& bs=impl_->balloons;
         const auto& scenario=Kinoko::System::RaceConfig::Instance()->raceScenario();
@@ -1117,9 +1121,11 @@ void RaceHud::drawOverlay(Renderer& renderer,const RaceItems& items,unsigned sta
             auto& s=seen[i];
             s.ok=renderer.projectTop(anchor(i),s.x,s.y,s.z)&&s.z<=0&&s.z>=-7500.f&&s.x>=0&&s.x<=400;
         }
-        if(stage<2){
+        if(grandPrix){
+            for(auto& b:bs)b={};
+        }else if(stage<2){
             for(auto& b:bs)b.racer=-1;
-            if(timer>180&&seen[0].ok)bs[0].racer=0;
+            if(240-int(timer)>180&&seen[0].ok)bs[0].racer=0;
         }else if(timer<420||finished){
             for(auto& b:bs)b.racer=-1;
         }else{
@@ -1133,8 +1139,10 @@ void RaceHud::drawOverlay(Renderer& renderer,const RaceItems& items,unsigned sta
                 if(seen[far->racer].z<seen[i].z)far->racer=int(i);
             }
         }
-        // eFade: alpha_0 / fade_in (30 frames) / alpha_255 / fade_out at 60 Hz.
-        for(unsigned elapsed=std::min(tick-impl_->balloonTick,30u);elapsed;--elapsed)for(auto& b:bs){
+        // eFade: alpha_0 / fade_in (30 frames) / alpha_255 / fade_out at 60 Hz. The
+        // race's first pass is the controls' first calc: one frame, not a catch-up.
+        const unsigned steps=impl_->balloonTick?std::min(tick-impl_->balloonTick,30u):1u;
+        for(unsigned elapsed=steps;elapsed;--elapsed)for(auto& b:bs){
             if(b.shown!=b.racer){if(b.shown>=0&&b.alpha>0)b.alpha=std::max(0.f,b.alpha-1.f/30);else{b.shown=b.racer;b.alpha=0;}}
             else if(b.shown>=0)b.alpha=std::min(1.f,b.alpha+1.f/30);
         }

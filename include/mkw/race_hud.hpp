@@ -53,6 +53,7 @@ public:
     // its own pose per age: course objects (bomb cars, fireballs, cannonballs) share it.
     void drawBombBlast(Renderer&,const C3D_Mtx& transform,unsigned age) const;
     bool speedometer=true; // SELECT toggles it during a race
+    bool grandPrix=false;  // a Grand Prix race (RaceConfig +0xB70 0): no name balloons
 private:
     struct Impl;std::unique_ptr<Impl> impl_;
 };

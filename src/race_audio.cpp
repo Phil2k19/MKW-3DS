@@ -977,15 +977,17 @@ struct RaceAudioLayer::Impl {
    playWall(e, k, in);
    k.wallFrames = 0;
   }
-  // Effects::Player::UpdateThunderEffects (8069971c): a Lightning strike restarts counter A
-  // (fn_1_288374); from frame 71 + the player's index until 690 a shocked racer's sparks
-  // hold SE_ITM_THNDR_STATE (fn_1_199318). Counter B runs the same way (fn_1_199794), but
-  // nothing in retail restarts it.
+  // Effects::Player::UpdateThunderEffects (8069971c, PAL fn_1_18D7F0 0x8069DBA4): a Lightning
+  // strike restarts counter A (fn_1_288374), a Thunder Cloud strike counter B (PAL 0x8058062C /
+  // 0x80580688, before applyLightningEffect). From frame 71 + the player's index until 690
+  // (A) or 540 (B) a shocked racer's sparks hold SE_ITM_THNDR_STATE (fn_1_199318 /
+  // fn_1_199794). While one counter is below 70 (0x8069DBE0 / 0x8069DD18: xori, cntlzw, slw,
+  // rlwinm. = x < 70) the other is held at its end.
   if (k.fxBeforeRespawn) k.thunderA = k.thunderB = 690;
   const bool shocked = bit(in.status, Shocked);
-  const bool atA = k.thunderA == 70;
+  const bool atA = k.thunderA < 70;
   if (atA) k.thunderB = 540;
-  const bool atB = k.thunderB == 70;
+  const bool atB = k.thunderB < 70;
   if (atB) k.thunderA = 690;
   if (shocked && !atA && k.thunderB == 540 && k.thunderA >= index + 71 && k.thunderA < 690) holdLimited(e, k, sid::ThndrState);
   k.thunderA = std::min(k.thunderA + 1, 690);
@@ -1752,6 +1754,8 @@ struct RaceAudioLayer::Impl {
    if (CloudAudio* cl = cloudOn(c.value); cl && p >= 0) { cl->carrier = p; itemStart(e, cl->o, sid::KumoAttach); }
    break;
   case ItemCloudStrike:   // ObjKumo::Update 807d77e4: the strike at frame 600
+   // PAL 0x8058062C: the struck racer's KartEffect +0x50 restarts (its crackle, effects()).
+   if (k) k->thunderB = 0;
    if (CloudAudio* cl = cloudOn(p)) { itemStart(e, cl->o, sid::KumoThndr); cl->struck = 0; }
    break;
   case ItemCloudOff:      // ObjKumo::Update 807d75b4: the carrier can no longer hold it
