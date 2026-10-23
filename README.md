@@ -92,10 +92,10 @@ New 3DS / New 2DS run at 60 FPS (30 FPS with the 3D slider up); Old 3DS / 2DS at
 
 | You are… | What to do |
 |---|---|
-| **Built your game with this fork's builder, v0.6.0 or newer** and copied `build/release/sd-card/3ds` to your SD card | ✅ **Scan the QR code below.** That's all. |
+| **Built your game with this fork's builder, v0.7.0 or newer** and copied `build/release/sd-card/3ds` to your SD card | ✅ **Scan the QR code below.** That's all. |
 | **Built with MiniBandit's builder** (any version) | ❌ **The QR code will NOT work for you.** This fork converts the game files differently. Download this fork's builder from the [latest release](../../releases/latest), build the game again and install the full CIA. After that, later updates are quick updates. |
 | **Never built the game** (no CIA from your own disc) | ❌ **The QR code is not the game.** It is a small update of a game you build yourself from your own Mario Kart Wii disc. Without a built game and its SD files it only shows a "build the game first" message. Use the builder. |
-| **Built with v0.6.0 or newer but didn't copy the SD folder** | ❌ Copy `build/release/sd-card/3ds` to the **root of your SD card** first, then scan. |
+| **Built with v0.7.0 or newer but didn't copy the SD folder** | ❌ Copy `build/release/sd-card/3ds` to the **root of your SD card** first, then scan. |
 
 MiniBandit's QR codes and store install MiniBandit's updates: don't use them on a
 game built with this fork.

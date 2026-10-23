@@ -1,15 +1,16 @@
 ThePhilosophicalOne fork (in progress)
-Wooden crates break and drop items
-  (Delfino Square, Toad's Factory)
-Wiggler hops and shakes when hit
-  by a Star, Mega or Bullet
-Wiggler bump and hit voices
-Item boxes ride the waves on
-  Rainbow Road and Bowser's Castle
-Bowser's Castle statue: retail
-  fire timing and mouth fire
-N64 Bowser's Castle statues fire
-  when you come near
-Old 3DS: less detail far away
-Builder: reinstalls missing Python
-  packages; macOS USB drive fix
+REBUILD NEEDED: new game files
+Title screen: retail pictures
+Pause: Classic Controller diagram,
+  retail captions, GP quit window
+Blooper ink, Bob-omb fuse, POW,
+  Thunder Cloud flash, Mushroom shine
+Mushrooms from Goombas visible
+Lightning flattens Goombas; it and
+  POW shake Wiggler
+Animated course textures and skies
+Retail lava and shiny materials
+Object sounds: cannons, crabs,
+  Wiggler, Pokey, Cataquacks
+Builder: courses convert again when
+  you rebuild in the same folder

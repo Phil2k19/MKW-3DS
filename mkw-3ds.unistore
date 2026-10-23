@@ -4,7 +4,7 @@
     "author": "ThePhilosophicalOne",
     "url": "https://raw.githubusercontent.com/ThePhilosophicalOne/MKW-3DS/retail-fixes/mkw-3ds.unistore",
     "file": "mkw-3ds.unistore",
-    "description": "Code updates for ThePhilosophicalOne's fork of the Mario Kart Wii 3DS port. NOT the game: you must build it yourself from your own disc first, with this fork's builder v0.6.0 or newer (https://github.com/ThePhilosophicalOne/MKW-3DS). Games built with MiniBandit's builder cannot use these updates.",
+    "description": "Code updates for ThePhilosophicalOne's fork of the Mario Kart Wii 3DS port. NOT the game: you must build it yourself from your own disc first, with this fork's builder v0.7.0 or newer (https://github.com/ThePhilosophicalOne/MKW-3DS). Games built with MiniBandit's builder cannot use these updates.",
     "version": 4,
     "revision": 1
   },
@@ -16,7 +16,7 @@
         "version": "latest",
         "category": ["game"],
         "console": ["3DS"],
-        "description": "Installs the newest code update over the game you built. REQUIRES a game built with this fork's builder v0.6.0 or newer; with an older or MiniBandit build, rebuild with this fork's latest builder instead. It is not the whole game: installed on its own, nothing appears on the HOME Menu.",
+        "description": "Installs the newest code update over the game you built. REQUIRES a game built with this fork's builder v0.7.0 or newer; with an older or MiniBandit build, rebuild with this fork's latest builder instead. It is not the whole game: installed on its own, nothing appears on the HOME Menu.",
         "license": "MIT (this continuation; see NOTICE)"
       },
       "Install the latest update": [

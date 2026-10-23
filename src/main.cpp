@@ -499,14 +499,14 @@ static bool sdContentReady()
     printf("\n  Mario Kart Wii 3DS\n\n");
     if (!found[0])
     {
-        printf("  This is a code update, not the whole game.\n  It needs a game built with v0.6.0 or newer.\n\n");
+        printf("  This is a code update, not the whole game.\n  It needs a game built with v0.7.0 or newer.\n\n");
         printf("  You build the game yourself, on your\n  computer, from your own Mario Kart Wii\n  disc. It can't be downloaded.\n\n");
         printf("  Builder and instructions:\n  %s\n\n", ProjectUrl);
-        printf("  Built with v0.6.0 or newer? Copy\n  build/release/sd-card/3ds to the root\n  of your SD card, or install your full CIA.\n");
+        printf("  Built with v0.7.0 or newer? Copy\n  build/release/sd-card/3ds to the root\n  of your SD card, or install your full CIA.\n");
     }
     else
     {
-        printf("  Your game files are from an older (or a\n  different) builder than this update needs.\n  Quick updates need v0.6.0 or newer.\n\n");
+        printf("  Your game files are from an older (or a\n  different) builder than this update needs.\n  Quick updates need v0.7.0 or newer.\n\n");
         printf("  Download the latest builder and build the\n  game again, then copy build/release/\n  sd-card/3ds to your SD card.\n\n");
         printf("  Help: %s\n", ProjectUrl);
     }
