@@ -1,16 +1,15 @@
 ThePhilosophicalOne fork (in progress)
-Pause: frozen race behind, retail
-  buttons per mode, faster Continue
-CPUs stop items when you finish
-Lakitu flag follows you at the finish
-Results no longer faded after a fall
-Shells: retail slopes, throws, lava
-Blue Shell flies and flaps like retail
-Fire, lava, volcano, propeller effects
-Toll bars and DK Summit gates lift
-Rainbow Road star rings + sound
-Item boxes ride Grumble rocks
-SSMT sparks, wheelie swish sound
-Voices: Wiggler, Blue Shell throw,
-  TT goal, title; ghosts silent
-Seagulls, sand, penguin sounds
+Wooden crates break and drop items
+  (Delfino Square, Toad's Factory)
+Wiggler hops and shakes when hit
+  by a Star, Mega or Bullet
+Wiggler bump and hit voices
+Item boxes ride the waves on
+  Rainbow Road and Bowser's Castle
+Bowser's Castle statue: retail
+  fire timing and mouth fire
+N64 Bowser's Castle statues fire
+  when you come near
+Old 3DS: less detail far away
+Builder: reinstalls missing Python
+  packages; macOS USB drive fix
