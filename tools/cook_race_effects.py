@@ -59,9 +59,19 @@ SLIPSTREAM_ROOTS = ['rk_slipStreamPre', 'rk_slipStreamPreS', 'rk_slipStream', 'r
 SMOKE_ROOTS = ['rk_start0', 'rk_start1', 'rk_start2', 'rk_startS', 'rk_startMiss', 'rk_startMissS',
                'rk_driftSmoke', 'rk_dirtSmokeA', 'rk_jumpSmoke', 'rk_jumpSmokeS', 'rk_jumpSmokeMini', 'rk_jumpSmokeMiniS',
                'rk_jumpSmokeBikeL', 'rk_jumpSmokeBikeLMini', 'rk_jumpSmokeBikeS', 'rk_jumpSmokeBikeL_S', 'rk_jumpSmokeBikeS_S']
+# KartEffect's stand-still mini-turbo for player 0 (mkw/kart_drift_effects.hpp SsmtEffects): the blue
+# 1T bursts fn_1_1A29F8 (PAL 0x806B2DAC) restarts (one-screen names, init 0x8068F044: kart +0x530
+# 10-15, bike +0x614 7-15) and the charge's wheel spin (0x80695BA8: kart +0x52c 2-7, bike +0x610 4-6).
+SSMT_ROOTS = ['rk_driftSpark1L1T_Chip00', 'rk_driftSpark1L1T_Spark00', 'rk_driftSpark1L1T_Spark01',
+              'rk_driftSpark1R1T_Chip00', 'rk_driftSpark1R1T_Spark00', 'rk_driftSpark1R1T_Spark01',
+              'rk_driftSpark1LB1T_Chip00', 'rk_driftSpark1LB1T_Spark00', 'rk_driftSpark1LB1T_Spark01',
+              'rk_driftSpark1RB1T_Chip00', 'rk_driftSpark1RB1T_Spark00', 'rk_driftSpark1RB1T_Spark01',
+              'rk_driftSpark1CB1T_Chip00', 'rk_driftSpark1CB1T_Spark00', 'rk_driftSpark1CB1T_Spark01',
+              'rk_wheelSpin0', 'rk_wheelSpin1', 'rk_wheelSpin2']
 VERSION = 3
 NO_INDEX = 0xffffffff
-# Runtime limits (src/nw4r_ef.cpp, src/race_effects.cpp).
+# Per cooked table (tools/cook_effect_archives.py splits archives by them); the merged table at
+# run time may grow to RaceEffects::MaxEmitters / MaxTextures (include/mkw/race_effects.hpp).
 MAX_EMITTERS, MAX_TEXTURES = 255, 96
 FORMS = {0: 'disc', 1: 'line', 7: 'cylinder', 8: 'sphere', 9: 'point'}
 PTCL_TYPES = {3: 'billboard', 4: 'directional', 5: 'stripe', 6: 'smooth stripe'}
@@ -420,7 +430,7 @@ def cook(root, output):
     idx, tindex = entries(br), entries(reft)
     order, notes, records = [], [], {}
     namespaces = {}
-    for roots in (ROOTS, POWERUP_ROOTS, SLIPSTREAM_ROOTS, SMOKE_ROOTS, SPIN_ROOTS, WATER_ROOTS):
+    for roots in (ROOTS, POWERUP_ROOTS, SLIPSTREAM_ROOTS, SMOKE_ROOTS, SPIN_ROOTS, WATER_ROOTS, SSMT_ROOTS):
         queue = list(roots)
         while queue:
             name = queue.pop(0)

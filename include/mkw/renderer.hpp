@@ -43,7 +43,10 @@ struct Submesh { uint32_t first,count; int32_t texture; uint32_t flags; int32_t 
     // per unit the GX minFilter + 1 (0: unknown) and, at bit 8, the lodBias in
     // signed 1/32 steps (tools/cook_model.py). Bit 3 (unit 0 only): a GX
     // projection-mapped texgen, the camera's screen position through the
-    // texture SRT in reflectionUv (menuReflection 0; the sea's glow).
+    // texture SRT in reflectionUv (menuReflection 0; the sea's glow). Bits 4..7:
+    // a material program (renderer.cpp drawNow), its stage 1/2 constants in
+    // reflectionConstant/reflectionAdd. Bit 19: unit 1 is a GX EnvCamera texgen
+    // through the texture SRT in reflectionUv.
     uint32_t sampler=0; };
 static_assert(offsetof(Submesh,menuReflection)==56&&offsetof(Submesh,sampler)==92&&sizeof(Submesh)==96,"GMDL v6 submesh stride");
 struct CourseLighting;
@@ -80,6 +83,15 @@ public:
     Vec3 minimum{},maximum{};
     // Opt-in for immutable geometry only; dynamic skinning must never use stale bounds.
     std::vector<SubmeshVisibility> visibility;
+    // GMDL MAN1 (tools/cook_model.py): course and sky material animation, which
+    // retail Field::CourseModel plays for every SRT0/PAT0/CLR0 clip from frame 0.
+    // Sorted by submesh; drawNow evaluates them at the draw's animation frame.
+    // kind 1 SRT (12 floats per record, every `step` frames and the last), 2 PAT
+    // (int16 primary/secondary texture per frame), 3 CLR (constant, tint RGBA8,
+    // added colour per frame; flags: SubmeshOverride Constant/Tint/Add).
+    struct MaterialTrack { uint32_t submesh; uint16_t kind,flags; uint32_t frames,loop,step,offset; };
+    std::vector<MaterialTrack> materialTracks;
+    std::vector<uint32_t> materialData;
     void enableStaticCulling();
     ~Model();
     bool load(const char* path);

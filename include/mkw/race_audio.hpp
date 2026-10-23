@@ -80,12 +80,15 @@ struct RaceAudioItem {
 };
 // RaceItems::sounds(): ItemSoundCue, holder, actor slot (0xff: none), ItemKind.
 struct RaceAudioItemSound { snd::Vec3f position; std::uint8_t cue = 0, player = 0xff, actor = 0xff, kind = 0, object = 0, value = 0; bool flag = false; };
-// A course object with a sound actor (ObjFlow sound mode 1 ObjectActor, 3
-// ObjectActorAnim), by registry slot, and one of its actor calls this tick.
+// A course object with a sound actor (ObjFlow sound mode 1 ObjectActor, 2 RaceAnimActor,
+// 3 ObjectActorAnim), by registry slot, and one of its actor calls this tick.
 struct RaceAudioObject { snd::Vec3f position; float scale = 1; std::uint16_t id = 0; std::uint8_t mode = 0; std::uint8_t index = 0; };
+// Animation: a BRASD event (race_audio_frame.cpp), value = its volume, with its pitch and its
+// index in ObjectSoundEvents (an event player restarts the same event).
 struct RaceAudioObjectSound {
  enum Call : std::uint8_t { Start, Hold, StartNew, Voice, Animation };
  std::uint16_t slot = 0, sound = 0; std::uint8_t call = Start; float value = 0;
+ float pitch = 1.0f; std::uint16_t event = 0xffff;
 };
 // A Rainbow Road star ring's SE_CN_RBW_STAR_RING calls of one tick (Kinoko ObjectStarRing,
 // retail calc 0x806BFED0): on each listed local racer's KartActor with its count, then on the

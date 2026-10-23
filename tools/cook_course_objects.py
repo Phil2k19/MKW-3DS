@@ -15,6 +15,9 @@ from cook_model import cook, COURSE_TEXELS
 
 OUT = ROOT / 'sd-card/3ds/mkw-3ds'
 EXCLUDED = {'course_model.brres', 'vrcorn_model.brres', 'map_model.brres'}
+# Placed archives that are pieces of the course itself (Grumble Volcano's falling
+# road, VolcanoPiece*: the course_model road materials): the course TEV rules.
+COURSE_PIECES = ('VolcanoPiece',)
 # Archives whose models share joint names: keep each model's own clips.
 CLIP_EXCLUDE = {
     ('hanachan', 'hanachan'): '^(wait|walk)$',
@@ -73,6 +76,8 @@ def cook_course(course, force):
             bank.unlink(missing_ok=True)
             env = {**os.environ, 'MKW_FREEZE_NONLINEAR_UV': '1', 'MKW_OBJECT_MATERIALS': '1', 'MKW_OBJECT_BANK': str(bank), 'MKW_RETAIL_LIGHTING': '1',
                    'MKW_TEXTURE_SOURCES': os.pathsep.join(str(folder / n) for n in ('course_model.brres', 'vrcorn_model.brres') if (folder / n).is_file())}
+            if resource.startswith(COURSE_PIECES):
+                env['MKW_COURSE_MATERIALS'] = '1'
             for (res, pattern), regex in CLIP_EXCLUDE.items():
                 if res == resource and pattern == model:
                     env['MKW_OBJECT_CLIP_EXCLUDE'] = regex

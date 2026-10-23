@@ -4,6 +4,7 @@
 #include "mkw/race_effects.hpp"
 #include "mkw/nw4r_ef_draw.hpp"
 #include "mkw/retail_lighting.hpp"
+#include "mkw/object_bank.hpp"
 #include <array>
 #include <mkw/menu_ui.hpp>
 #include <mkw/render_metrics.hpp>
@@ -179,6 +180,29 @@ return false;}
     vertices=static_cast<Vertex*>(linearAlloc(vertexCount*sizeof(Vertex)));
     indices=static_cast<uint16_t*>(linearAlloc(indexCount*sizeof(uint16_t)));
     if(!vertices||!indices||!f.read(vertices,vertexCount*sizeof(Vertex))||!f.read(indices,indexCount*sizeof(uint16_t)))return false;
+    // Optional MAN1 block: course and sky material animation tracks.
+    uint32_t block[2];
+    if(f.read(block,sizeof block)){
+        if(std::memcmp(block,"MAN1",4)||!block[1]||block[1]>4u*submeshes.size())return false;
+        materialTracks.reserve(block[1]);
+        for(uint32_t n=0;n<block[1];++n){
+            uint32_t t[6];if(!f.read(t,sizeof t))return false;
+            const uint32_t kind=t[1]&255,flags=t[1]>>8,frames=t[2],step=t[4],records=t[5];
+            if(t[0]>=submeshes.size()||(!materialTracks.empty()&&materialTracks.back().submesh>t[0])||kind<1||kind>3||flags>255||
+               !frames||frames>65535||t[3]>1||!step||step>65535||records!=(kind==1?(frames-1+step-1)/step+1:frames))return false;
+            const std::size_t words=std::size_t(records)*(kind==1?12:kind==2?1:3);
+            const std::size_t offset=materialData.size();materialData.resize(offset+words);
+            if(!f.read(materialData.data()+offset,words*4))return false;
+            const int32_t textureCount=int32_t(textures.size());
+            for(std::size_t k=0;k<words;++k){
+                const uint32_t w=materialData[offset+k];
+                float x;std::memcpy(&x,&w,4);
+                const int16_t p=int16_t(w&0xffff),q=int16_t(w>>16);
+                if((kind==1&&!std::isfinite(x))||(kind==2&&(p< -1||q< -1||p>=textureCount||q>=textureCount)))return false;
+            }
+            materialTracks.push_back({t[0],uint16_t(kind),uint16_t(flags),frames,t[3],step,uint32_t(offset)});
+        }
+    }
     if(!f.atEnd())return false;
     file.reset();
     for(uint32_t i=0;i<indexCount;++i)if(indices[i]>=vertexCount)return false;
@@ -609,14 +633,13 @@ static bool sameMaterial(const Submesh& a,const Submesh& b){
            a.menuReflection==b.menuReflection&&a.reflectionConstant==b.reflectionConstant&&a.reflectionAdd==b.reflectionAdd&&
            !std::memcmp(a.reflectionUv,b.reflectionUv,sizeof a.reflectionUv)&&a.sampler==b.sampler;
 }
-// Authored GX LOD biases reach -4; the PICA computes LOD at 400x240. Clamp
-// to this range until it is tuned on hardware.
-constexpr float LodBiasMin=-1.5f,LodBiasMax=0.f;
 // GMDL v6 sampler state (Submesh::sampler) of one texture unit. 0 keeps the
 // loader's state: linear, and linear between mip levels when there are any.
+// The authored GX LOD bias (-4..+1.5 on courses) is applied as is, as retail
+// and upstream (Epic0522/Misuzu, hardware-tested) do.
 static void setSampler(C3D_Tex* texture,uint32_t unit){
     const unsigned filter=unit&7u;
-    float bias=std::clamp(int8_t(unit>>8)/32.f,LodBiasMin,LodBiasMax);
+    float bias=int8_t(unit>>8)/32.f;
     // GX NEAR/LINEAR never leave level 0: bias the LOD below every level.
     if((filter==1||filter==2)&&texture->maxLevel)bias=-16.f;
     // filter-1 is GX NEAR, LINEAR, NEAR_MIP_NEAR, LIN_MIP_NEAR, NEAR_MIP_LIN, LIN_MIP_LIN.
@@ -626,6 +649,9 @@ static void setSampler(C3D_Tex* texture,uint32_t unit){
 }
 // Submesh::sampler bit 3: unit 0 is a GX projection-mapped texgen.
 constexpr uint32_t SamplerProjected=1u<<3;
+// Bit 19 (unit 1's bit 3): unit 1 is a GX EnvCamera texgen (tools/export_brres.ts),
+// the view-space normal through the texture SRT in reflectionUv (menuReflection 0).
+constexpr uint32_t SamplerEnvironment1=1u<<19;
 // Its (s*q, t*q, q) rows on the eye position. GX maps the camera's screen to
 // s=0.5+0.5x, t=0.5-0.5y (t down; nw4r projection texture matrix), applies the
 // texture SRT uv (s'=uv0*s+uv1*t+uv2, t'=uv3*s+uv4*t+uv5) and divides by q per
@@ -640,6 +666,35 @@ static void projectedRows(const C3D_Mtx& projection,float horizontalSign,const f
         rows[1].c[c]=q.c[c]-(uv[3]*s+uv[4]*t+uv[5]*q.c[c]);
         rows[2].c[c]=q.c[c];
     }
+}
+// Submesh i's GMDL MAN1 tracks at animation frame `frame`: the retail course
+// model's SRT0/PAT0/CLR0 clips, each looping or held at its end by its own
+// flag. `next` is the caller's cursor into the sorted tracks (submeshes ascend).
+static bool materialAnimation(const Model& model,std::size_t i,uint32_t frame,std::size_t& next,SubmeshOverride& o){
+    const auto& tracks=model.materialTracks;
+    while(next<tracks.size()&&tracks[next].submesh<i)++next;
+    if(next>=tracks.size()||tracks[next].submesh!=i)return false;
+    o={};o.uv[0]=o.uv[4]=o.uv[6]=o.uv[10]=1;o.texture[0]=o.texture[1]=-1;o.tint[0]=o.tint[1]=o.tint[2]=o.tint[3]=1;
+    for(;next<tracks.size()&&tracks[next].submesh==i;++next){
+        const auto& t=tracks[next];const uint32_t* data=model.materialData.data()+t.offset;
+        const uint32_t index=t.loop?frame%t.frames:std::min(frame,t.frames-1);
+        if(t.kind==1){
+            const auto s=sampleClip(t.frames,t.step,t.loop,float(index));
+            float a[12],b[12];std::memcpy(a,data+std::size_t(s.a)*12,sizeof a);std::memcpy(b,data+std::size_t(s.b)*12,sizeof b);
+            for(unsigned k=0;k<12;++k)o.uv[k]=a[k]+(b[k]-a[k])*s.t;
+            o.flags|=SubmeshOverride::Uv;
+        }else if(t.kind==2){
+            const uint32_t w=data[index];
+            o.texture[0]=int16_t(w&0xffff);o.texture[1]=int16_t(w>>16);
+            if(o.texture[0]>=0||o.texture[1]>=0)o.flags|=SubmeshOverride::Texture;
+        }else{
+            const uint32_t* w=data+std::size_t(index)*3;
+            if(t.flags&SubmeshOverride::Constant){o.constant=w[0];o.flags|=SubmeshOverride::Constant;}
+            if(t.flags&SubmeshOverride::Tint){for(unsigned k=0;k<4;++k)o.tint[k]=float((w[1]>>(8*k))&255)*(1.f/255.f);o.flags|=SubmeshOverride::Tint;}
+            if(t.flags&SubmeshOverride::Add){o.add=w[2];o.flags|=SubmeshOverride::Add;}
+        }
+    }
+    return o.flags!=0;
 }
 void Renderer::resetMaterialUniforms(){
     if(uvDirty_){
@@ -686,6 +741,8 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
     // The last drawn submesh whose material state is still bound, and its end
     // of submesh (retailEndSubmesh), deferred while the next one repeats it.
     const Submesh* last=nullptr;bool lastRetail=false,lastEnvironment=false,pendingEnd=false;
+    // Material animation (GMDL MAN1): the next track to look at and its result.
+    std::size_t trackCursor=0;SubmeshOverride ownOverride;
     for(std::size_t i=0;i<model.submeshes.size();++i){
         if(visible && !visible(context,i))continue;
         const auto& s=model.submeshes[i];
@@ -712,18 +769,22 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
             if(!ranges.count){++stats_.culledSubmeshes;continue;}
         }else ranges.append({s.first,s.count});
         const SubmeshOverride* o=overrides_&&i<overrideCount_&&overrides_[i].flags?&overrides_[i]:nullptr;
-        if(o&&(o->flags&SubmeshOverride::Uv)){
+        // The model's own course/sky material animation, unless the draw overrides it.
+        if(!o&&!model.materialTracks.empty()&&materialAnimation(model,i,animationFrame,trackCursor,ownOverride))o=&ownOverride;
+        const bool overrideUv=o&&(o->flags&SubmeshOverride::Uv),overrideTint=o&&(o->flags&SubmeshOverride::Tint);
+        // Reset inherited rows/tint before this submesh's own: resetting after
+        // the UV rows (when only the tint ended) erased them (upstream's fix).
+        if((uvDirty_&&!overrideUv)||(tintDirty_&&!overrideTint))resetMaterialUniforms();
+        if(overrideUv){
             // An SRT0 track replaces the authored constant-rate scroll.
             for(unsigned row=0;row<4;++row)C3D_FVUnifSet(GPU_VERTEX_SHADER,uvRowLoc_[row],o->uv[row*3],o->uv[row*3+1],o->uv[row*3+2],0);
             C3D_FVUnifSet(GPU_VERTEX_SHADER,uvScrollLoc_,0,0,0,0);uvDirty_=true;
         }else{
-            if(uvDirty_)resetMaterialUniforms();
             const uint32_t frames=s.animationFrames&0xffff;
             const float frame=frames?float(animationFrame%frames):0.f;
             C3D_FVUnifSet(GPU_VERTEX_SHADER,uvScrollLoc_,s.uvVelocity[0]*frame,s.uvVelocity[1]*frame,s.uvVelocity[2]*frame,s.uvVelocity[3]*frame);
         }
-        if(o&&(o->flags&SubmeshOverride::Tint)){C3D_FVUnifSet(GPU_VERTEX_SHADER,tintLoc_,o->tint[0],o->tint[1],o->tint[2],o->tint[3]);tintDirty_=true;}
-        else if(tintDirty_)resetMaterialUniforms();
+        if(overrideTint){C3D_FVUnifSet(GPU_VERTEX_SHADER,tintLoc_,o->tint[0],o->tint[1],o->tint[2],o->tint[3]);tintDirty_=true;}
         // The previous drawn submesh's material and textures, without overrides
         // or a binder: its whole state is still bound, only UVs and draws differ.
         const bool repeat=last&&!o&&!material&&sameMaterial(*last,s);
@@ -825,6 +886,50 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
                 C3D_TexEnvOpRgb(e2,GPU_TEVOP_RGB_SRC_COLOR,GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR,GPU_TEVOP_RGB_SRC_COLOR);
                 C3D_TexEnvFunc(e2,C3D_RGB,GPU_MULTIPLY_ADD);
             }
+            // GMDL v6 material programs (Submesh::sampler bits 4..7, tools/export_brres.ts
+            // programRule): the colour of stages 0..2 for GX equations the modes above
+            // cannot hold. k0 = constant, k1/k2 = reflectionConstant/reflectionAdd, V the
+            // vertex colour; s0/s1 the flags' scale/first-stage scale.
+            if(const unsigned program=(s.sampler>>4)&15u){
+                auto* e2=C3D_GetTexEnv(2);
+                C3D_TexEnvColor(e0,constant);C3D_TexEnvOpRgb(e0,GPU_TEVOP_RGB_SRC_COLOR);
+                C3D_TexEnvScale(e0,C3D_RGB,program==4||program==5?GPU_TEVSCALE_1:scales[(s.flags>>4)&3]);
+                if(program==1){
+                    // T0*k0 + V
+                    C3D_TexEnvSrc(e0,C3D_RGB,GPU_TEXTURE0,GPU_CONSTANT,GPU_PRIMARY_COLOR);C3D_TexEnvFunc(e0,C3D_RGB,GPU_MULTIPLY_ADD);
+                }else if(program==2){
+                    // T0*V*s0
+                    C3D_TexEnvSrc(e0,C3D_RGB,GPU_TEXTURE0,GPU_PRIMARY_COLOR);C3D_TexEnvFunc(e0,C3D_RGB,GPU_MODULATE);
+                }else if(program==3||program==4){
+                    // lerp(k0, V, T0) = V*T0 + k0*(1-T0)
+                    C3D_TexEnvSrc(e0,C3D_RGB,GPU_PRIMARY_COLOR,GPU_CONSTANT,GPU_TEXTURE0);C3D_TexEnvFunc(e0,C3D_RGB,GPU_INTERPOLATE);
+                }else if(program==7){
+                    // (T0 + V)*s0 (Daisy Circuit's sky)
+                    C3D_TexEnvSrc(e0,C3D_RGB,GPU_TEXTURE0,GPU_PRIMARY_COLOR);C3D_TexEnvFunc(e0,C3D_RGB,GPU_ADD);
+                }else if(program==6){
+                    // T1*V*s0, unit 0 projected (+ T0*k1 + k2 below)
+                    C3D_TexEnvSrc(e0,C3D_RGB,GPU_TEXTURE1,GPU_PRIMARY_COLOR);C3D_TexEnvFunc(e0,C3D_RGB,GPU_MODULATE);
+                }else if(program==5){
+                    // lerp(T0, 1, T1)*V*s0 (Rainbow Road's earth under its clouds)
+                    C3D_TexEnvColor(e0,0xffffffffu);
+                    C3D_TexEnvSrc(e0,C3D_RGB,GPU_CONSTANT,GPU_TEXTURE0,GPU_TEXTURE1);C3D_TexEnvFunc(e0,C3D_RGB,GPU_INTERPOLATE);
+                    C3D_TexEnvSrc(e1,C3D_RGB,GPU_PREVIOUS,GPU_PRIMARY_COLOR);C3D_TexEnvOpRgb(e1,GPU_TEVOP_RGB_SRC_COLOR);
+                    C3D_TexEnvFunc(e1,C3D_RGB,GPU_MODULATE);C3D_TexEnvScale(e1,C3D_RGB,scales[(s.flags>>4)&3]);
+                }
+                if(program==4){
+                    // Lava: (x + k1 - 0.5)*s1 (the GX bias and scale), then + T1*T0.alpha.
+                    C3D_TexEnvColor(e1,s.reflectionConstant);C3D_TexEnvSrc(e1,C3D_RGB,GPU_PREVIOUS,GPU_CONSTANT);C3D_TexEnvOpRgb(e1,GPU_TEVOP_RGB_SRC_COLOR);
+                    C3D_TexEnvFunc(e1,C3D_RGB,GPU_ADD_SIGNED);C3D_TexEnvScale(e1,C3D_RGB,scales[(s.flags>>14)&3]);
+                    C3D_TexEnvSrc(e2,C3D_RGB,GPU_TEXTURE1,GPU_TEXTURE0,GPU_PREVIOUS);C3D_TexEnvOpRgb(e2,GPU_TEVOP_RGB_SRC_COLOR,GPU_TEVOP_RGB_SRC_ALPHA);
+                    C3D_TexEnvFunc(e2,C3D_RGB,GPU_MULTIPLY_ADD);
+                }else if(program!=5&&program!=7){
+                    // + T1*k1 (T0*k1 for program 6), + k2.
+                    C3D_TexEnvColor(e1,s.reflectionConstant);C3D_TexEnvSrc(e1,C3D_RGB,program==6?GPU_TEXTURE0:GPU_TEXTURE1,GPU_CONSTANT,GPU_PREVIOUS);C3D_TexEnvOpRgb(e1,GPU_TEVOP_RGB_SRC_COLOR);
+                    C3D_TexEnvFunc(e1,C3D_RGB,GPU_MULTIPLY_ADD);
+                    C3D_TexEnvColor(e2,s.reflectionAdd);C3D_TexEnvSrc(e2,C3D_RGB,GPU_PREVIOUS,GPU_CONSTANT);C3D_TexEnvOpRgb(e2,GPU_TEVOP_RGB_SRC_COLOR);
+                    C3D_TexEnvFunc(e2,C3D_RGB,GPU_ADD);
+                }
+            }
             if(s.menuReflection){
                 // GX: clamp(albedo*rasC + C1), then + reflection*APREV
                 // (APREV = albedo alpha * authored konst) or * konst RGB.
@@ -874,6 +979,10 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
             }else if(alphaMode==5){
                 C3D_TexEnvColor(alpha,constant);
                 C3D_TexEnvSrc(alpha,C3D_Alpha,GPU_TEXTURE0,GPU_TEXTURE1,GPU_CONSTANT);C3D_TexEnvFunc(alpha,C3D_Alpha,GPU_INTERPOLATE);
+            }else if(alphaMode==7){
+                // A single texture alpha doubled by the GX alpha scale (Fire Snake flames).
+                C3D_TexEnvSrc(alpha,C3D_Alpha,GPU_TEXTURE0,GPU_PRIMARY_COLOR);C3D_TexEnvFunc(alpha,C3D_Alpha,GPU_MODULATE);
+                C3D_TexEnvScale(alpha,C3D_Alpha,GPU_TEVSCALE_2);
             }
         }
         if(additiveColor||(o&&(o->flags&SubmeshOverride::Add))){
@@ -969,6 +1078,27 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
         } // !repeat
         const bool menuEnvironment=s.menuReflection&&s.menuReflection!=3;
         if(menuEnvironment)environmentUvNow(transform,s.reflectionUv);
+        // A GX EnvCamera unit 1 (SamplerEnvironment1): its SRT plus the constant-rate
+        // SRT0 scroll (uvVelocity, cooked v-up convention) or an SRT0 track relative to
+        // the cooked frame-0 SRT (SubmeshOverride::Uv rows 2/3, tools/object_bank.ts).
+        // GPU-skinned draws, whose normals hold palette indices, keep the cooked UV1.
+        const bool environment1=!menuEnvironment&&(s.sampler&SamplerEnvironment1)&&!(skinPalette_&&!model.skinBoneIndices);
+        if(environment1){
+            float uv[6];std::memcpy(uv,s.reflectionUv,sizeof uv);
+            const bool track=o&&(o->flags&SubmeshOverride::Uv);
+            if(!track){
+                const uint32_t frames=s.animationFrames&0xffff;
+                const float frame=frames?float(animationFrame%frames):0.f;
+                uv[2]+=s.uvVelocity[2]*frame;uv[5]-=s.uvVelocity[3]*frame;
+            }
+            if(parts)uv1TransformNow(uv);else environmentUvNow(transform,uv);
+            if(track){
+                // The track's v-up rows after the frame-0 SRT's (uv1TransformNow's form).
+                const float* t=o->uv+6;const float r0[3]={uv[0],-uv[1],uv[1]+uv[2]},r1[3]={-uv[3],uv[4],1-uv[4]-uv[5]};
+                C3D_FVUnifSet(GPU_VERTEX_SHADER,uv1RowLoc_[0],t[0]*r0[0]+t[1]*r1[0],t[0]*r0[1]+t[1]*r1[1],0,t[0]*r0[2]+t[1]*r1[2]+t[2]);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER,uv1RowLoc_[1],t[3]*r0[0]+t[4]*r1[0],t[3]*r0[1]+t[4]*r1[1],0,t[3]*r0[2]+t[4]*r1[2]+t[5]);
+            }
+        }
         if(parts){
             const bool environment=(s.flags&(1u<<25))&&((s.flags>>12)&3)==3&&rigid_->stride>=21;
             for(size_t n=0;n<parts->size();++n){
@@ -979,7 +1109,7 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
                 for(unsigned row=0;row<3;++row)for(unsigned col=0;col<4;++col)bone.r[row].c[3-col]=m[row*4+col];
                 C3D_Mtx local,partView;Mtx_Multiply(&local,&transform,&bone);Mtx_Multiply(&partView,&view_,&local);
                 C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER,modelViewLoc_,&partView);
-                if(retailEnvironment)this->retailEnvironment(partView);
+                if(retailEnvironment||environment1)this->retailEnvironment(partView);
                 if(environment){
                     for(unsigned row=0;row<3;++row)C3D_FVUnifSet(GPU_VERTEX_SHADER,envRowLoc_[row],m[12+row*3],m[13+row*3],m[14+row*3],0);
                     C3D_FVUnifSet(GPU_VERTEX_SHADER,envParamLoc_,std::cos(rigid_->environmentYaw),std::sin(rigid_->environmentYaw),1,0);
@@ -992,6 +1122,7 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
                 C3D_FVUnifSet(GPU_VERTEX_SHADER,envParamLoc_,1,0,0,0);
                 C3D_BoolUnifSet(GPU_VERTEX_SHADER,environmentMappedLoc_,false);
             }
+            if(environment1)clearEnvironmentUvNow();
             pendingEnd=retail;
             continue;
         }
@@ -1000,7 +1131,7 @@ void Renderer::drawNow(const Model& model,const Vertex* vertices,const C3D_Mtx& 
             C3D_DrawElements(GPU_TRIANGLES,range.count,C3D_UNSIGNED_SHORT,model.indices+range.first);
             stats_.triangles+=range.count/3;++stats_.drawCalls;
         }
-        if(menuEnvironment)clearEnvironmentUvNow();
+        if(menuEnvironment||environment1)clearEnvironmentUvNow();
         pendingEnd=retail;
     }
     if(pendingEnd)retailEndSubmesh();

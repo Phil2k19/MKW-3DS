@@ -50,7 +50,7 @@ inline unsigned appendRefxEmitters(std::vector<uint8_t>& base,const std::vector<
     auto texture=[&](uint32_t t)->int{
         if(t>=eh.textures)return -1;
         if(textureMap[t]<0){
-            if(textures.size()/TexBytes>=96)return -1;
+            if(textures.size()/TexBytes>=RaceEffects::MaxTextures)return -1;
             textureMap[t]=int(textures.size()/TexBytes);textures.insert(textures.end(),et+size_t(t)*TexBytes,et+size_t(t+1)*TexBytes);
         }
         return textureMap[t];
@@ -99,7 +99,7 @@ inline unsigned appendRefxEmitters(std::vector<uint8_t>& base,const std::vector<
         ++added;
     }
     while(blob.size()%4)blob.push_back(0);
-    if(!added||bh.emitters+added>255||blob.size()>(1u<<20))return 0;
+    if(!added||bh.emitters+added>RaceEffects::MaxEmitters||blob.size()>(1u<<20))return 0;
     Head h=bh;h.emitters+=added;h.textures=uint32_t(textures.size()/TexBytes);h.blob=uint32_t(blob.size());
     std::vector<uint8_t> out(sizeof h);std::memcpy(out.data(),&h,sizeof h);
     out.insert(out.end(),textures.begin(),textures.end());out.insert(out.end(),records.begin(),records.end());out.insert(out.end(),blob.begin(),blob.end());
@@ -131,11 +131,13 @@ inline unsigned appendRefxEmitters(std::vector<uint8_t>& base,const std::vector<
 // OneT puff (rk_miniTurbo1T, rk_gasSmokeOneT) and the idle rk_gasSmoke are not ported here.
 // Only the nearest few racers are outside the LOD at once, so the slots form a pool of
 // blocks, one per racer outside the LOD, released at the kill on the LOD edge.
+// The last RaceEffects slots belong to player 0's stand-still mini-turbo (SsmtEffects).
+inline constexpr unsigned SsmtSlots=12,SsmtFirstSlot=RaceEffects::SlotCount-SsmtSlots;
 class KartDriftEffects {
 public:
     static constexpr unsigned MaxRacers=12,Pipes=4,SlotsPerBlock=6+Pipes;
     static constexpr unsigned FirstSlot=KartTerrainEffects::DirtSlot+1;
-    static constexpr unsigned Blocks=(RaceEffects::SlotCount-FirstSlot)/SlotsPerBlock;
+    static constexpr unsigned Blocks=(SsmtFirstSlot-FirstSlot)/SlotsPerBlock;
     // One screen: 3 racers outside the LOD (KartEffectLod::limits), one more for the step
     // in which one leaves and another enters it.
     static_assert(Blocks>=4,"drift effect slots");
@@ -423,7 +425,7 @@ private:
 // restarts the blue 1T bursts (rk_driftSpark1L1T/1R1T, +0x530 handles 10..15); with it set
 // it emits the blue drift sparks rk_driftSpark1L/1R_Spark00/01 (handles 2..5) at the rear
 // wheels, a bike's by the stick (+0x614 LB, RB or CB, fn_1_192B6C). The 1T bursts and the
-// wheel spin of the charge (rk_wheelSpin0..2 while +0x43 = status 57) are not ported here.
+// wheel spin of the charge (rk_wheelSpin0..2 while +0x43 = status 57) are SsmtEffects.
 class SsmtSparks {
 public:
     static constexpr int16_t FullCharge=75;
@@ -436,5 +438,97 @@ public:
     }
 private:
     int16_t charge_=0;bool charged_=false,leeway_=false; // as the step found them
+};
+
+// Player 0's stand-still mini-turbo effects (KartEffect, PAL). The SSMT update fn_1_1A29F8
+// (0x806B2DAC), which KartMove::calcSsmt calls during the physics (SsmtSparks::called, +0x90),
+// creates on the first call of a run (+0x91 clear) the blue 1T bursts (EGG::Effect create,
+// unless running) at each rear wheel on the floor or under 10 frames in the air (+0x80/+0x84
+// against +0xae0): a kart's rk_driftSpark1L1T_* / 1R1T_* (+0x530 handles 10-12 / 13-15), a
+// bike's at its rear wheel by the stick: StickLeft 1RB1T (+0x614 10-12), else StickRight 1LB1T
+// (7-9), else 1CB1T (13-15). Every call then moves the running ones (0x806979F0) to the wheels
+// as the last update left them (+0x6f4 axes, +0x7bc/+0x7c8; an inside-drift bike's frame
+// +0x818). The update after the physics (0x80695BA8, non-CPU racers): without +0x90,
+// ChargingSSMT (+0x43) emits rk_wheelSpin0/1/2 at the rear wheels (0x806975D4; kart +0x52c 2-4
+// and 5-7, bike +0x610 4-6 at its rear wheel), else they followFade (0x80697788) unless +0x44
+// (0x80694BC8: Brake held 3 to 40 frames into the reverse counter); with +0x90 the running ones
+// are killed. One local player: the one-screen names (KartEffect init 0x8068F044, +0xf). Not
+// ported: their setScale while the kart is scaled (+0xb0: Mega, shrunk).
+class SsmtEffects {
+public:
+    static constexpr unsigned FirstSlot=SsmtFirstSlot;
+    struct Input {
+        EffectFrame pose;             // +0x6f4 axes, +0x6d0 position
+        Vec3 wheel[2]{};              // +0x7bc / +0x7c8: a kart's rear wheels, a bike's front and rear
+        bool floor[2]{};              // +0x7b9 / +0x7ba
+        Vec3 rearFloorNormal{0,1,0};  // a bike's rear floor normal (+0x818's up)
+        bool bike=false,insideBike=false;
+        bool stickLeft=false,stickRight=false;      // status 13 / 24
+        bool charging=false;                        // +0x43: ChargingSSMT (status 57)
+        bool brake=false,waitingForBackwards=false; // +0x44's counter (0x80694B40)
+        bool called=false,wasCalled=false;          // SsmtSparks: this step's +0x90, the last one's
+    };
+    bool bind(const RaceEffects& e){
+        static constexpr const char* Names[FxCount]={
+            "rk_driftSpark1L1T_Chip00","rk_driftSpark1L1T_Spark00","rk_driftSpark1L1T_Spark01",
+            "rk_driftSpark1R1T_Chip00","rk_driftSpark1R1T_Spark00","rk_driftSpark1R1T_Spark01",
+            "rk_driftSpark1LB1T_Chip00","rk_driftSpark1LB1T_Spark00","rk_driftSpark1LB1T_Spark01",
+            "rk_driftSpark1RB1T_Chip00","rk_driftSpark1RB1T_Spark00","rk_driftSpark1RB1T_Spark01",
+            "rk_driftSpark1CB1T_Chip00","rk_driftSpark1CB1T_Spark00","rk_driftSpark1CB1T_Spark01",
+            "rk_wheelSpin0","rk_wheelSpin1","rk_wheelSpin2"};
+        bool all=true;
+        for(unsigned i=0;i<FxCount;++i)all&=(spec_[i]=e.find(Names[i]))>=0;
+        return all;
+    }
+    void reset(){air_={};floor_={};wheel_={};pose_={};bikeUp_={0,1,0};counter_=1000;waiting_=false;}
+    void step(RaceEffects& e,const Input& in){
+        const unsigned bursts=in.bike?9:6;
+        if(in.called){
+            // fn_1_1A29F8, on the last update's wheels.
+            auto burst=[&](unsigned first,unsigned w,unsigned spec){
+                for(unsigned j=0;j<3;++j)e.create(FirstSlot+first+j,spec_[spec+j],at(in,pose_,wheel_[w],true),Group);
+            };
+            if(!in.wasCalled){
+                if(!in.bike){for(unsigned w=0;w<2;++w)if(floor_[w]||air_[w]<AirFrames)burst(w*3,w,w*3);}
+                else if(floor_[1]||air_[1]<AirFrames){const unsigned set=in.stickLeft?1:!in.stickRight?2:0;burst(set*3,1,6+set*3);}
+            }
+            for(unsigned i=0;i<bursts;++i)e.move(FirstSlot+i,at(in,pose_,wheel_[in.bike?1:i/3],true));
+        }
+        // 0x806946BC: this update's air frames and the reverse counter (+0x40, +0x42, +0x44).
+        for(unsigned w=0;w<2;++w)air_[w]=in.floor[w]?0:air_[w]+1;
+        if(in.waitingForBackwards&&waiting_)counter_=0;
+        waiting_=in.waitingForBackwards;
+        if(++counter_>1000||!in.brake)counter_=1000;
+        const bool reverse=in.brake&&counter_>=3&&counter_<=40;
+        // 0x80695BA8: the wheel spin.
+        const unsigned spin=in.bike?9:6,spins=in.bike?3:6;
+        if(!in.called){
+            for(unsigned k=0;k<spins;++k){
+                const unsigned slot=spin+k;const EffectFrame f=at(in,in.pose,in.wheel[in.bike?1:k/3],false);
+                if(in.charging){e.create(FirstSlot+slot,spec_[15+k%3],f,Group);e.move(FirstSlot+slot,f);}
+                else if(!reverse&&e.alive(FirstSlot+slot)){e.followFade(FirstSlot+slot);e.move(FirstSlot+slot,f);}
+            }
+        }else for(unsigned k=0;k<spins;++k)e.kill(FirstSlot+spin+k);
+        // 0x80696CF0: this update's pose and wheels for the next SSMT call.
+        pose_=in.pose;wheel_[0]=in.wheel[0];wheel_[1]=in.wheel[1];floor_[0]=in.floor[0];floor_[1]=in.floor[1];
+        bikeUp_=in.rearFloorNormal;
+    }
+private:
+    static constexpr unsigned FxCount=18,AirFrames=10; // +0xae0 (0x8068EA58)
+    static constexpr uint8_t Group=KartFxSlots::FirstGroup; // racer 0
+    // The kart's axes at a wheel; an inside-drift bike's 1T bursts take +0x818 (up = the rear
+    // floor normal, forward = the kart's made perpendicular to it).
+    EffectFrame at(const Input& in,const EffectFrame& pose,Vec3 origin,bool burst) const {
+        EffectFrame f=pose;f.origin=origin;f.scale=1;
+        if(burst&&in.bike&&in.insideBike){
+            const Vec3 up=bikeUp_;
+            f.z=normalized(tangent(pose.z,up),pose.z);f.y=up;f.x=cross(up,f.z);
+        }
+        return f;
+    }
+    std::array<int,FxCount> spec_{};
+    std::array<unsigned,2> air_{};std::array<bool,2> floor_{};std::array<Vec3,2> wheel_{};
+    EffectFrame pose_{};Vec3 bikeUp_{0,1,0};
+    unsigned counter_=1000;bool waiting_=false;
 };
 }

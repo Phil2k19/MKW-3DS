@@ -21,7 +21,10 @@ struct EffectTexture { char name[32]; uint16_t width,height,paddedWidth,paddedHe
 // Steps at the 60 Hz simulation rate; presentation only.
 class RaceEffects {
 public:
-    static constexpr unsigned SlotCount=592;
+    static constexpr unsigned SlotCount=604;
+    // The merged table's limits at run time (race-effects.bin, KartDriftEffects' appended
+    // emitters, the course's archives): each cooked table keeps 255 emitters and 96 textures.
+    static constexpr unsigned MaxEmitters=264,MaxTextures=104;
     RaceEffects();
     ~RaceEffects();
     bool load(const char* path);

@@ -15,6 +15,9 @@
 namespace mkw {
 namespace {
 constexpr float XScale=400.f/608.f,YScale=display::MenuScaleY;
+// Title variants 0-4 (MenuState::titleVariant): the picture panes of
+// title_image_common.brlyt, cooked as title_scene_* / title_blur_scene_*.
+constexpr const char* TitleVariants[]={"mario1","mario2","peach","luiji","koopa"};
 constexpr const char* CupNames[]={"Mushroom Cup","Flower Cup","Star Cup","Special Cup","Shell Cup","Banana Cup","Leaf Cup","Lightning Cup"};
 constexpr const char* CourseNames[]={"Luigi Circuit","Moo Moo Meadows","Mushroom Gorge","Toad's Factory","Mario Circuit","Coconut Mall","DK Summit","Wario's Gold Mine","Daisy Circuit","Koopa Cape","Maple Treeway","Grumble Volcano","Dry Dry Ruins","Moonview Highway","Bowser's Castle","Rainbow Road","GCN Peach Beach","DS Yoshi Falls","SNES Ghost Valley 2","N64 Mario Raceway","N64 Sherbet Land","GBA Shy Guy Beach","DS Delfino Square","GCN Waluigi Stadium","DS Desert Hills","GBA Bowser Castle 3","N64 DK's Jungle Parkway","GCN Mario Circuit","SNES Mario Circuit 3","DS Peach Gardens","GCN DK Mountain","N64 Bowser's Castle"};
 struct Pose {
@@ -524,7 +527,9 @@ static void composeMenuImpl(const MenuState& s,const UiRaceView& race,std::vecto
  // 0x28 Battle) have no MenuBG page: the pause pages and page 0x2C lie over the
  // frozen race (main.cpp), so they compose no background either.
  const bool raceSection=s.page==UiPage::Pause||s.page==UiPage::QuitConfirm;
- if(s.page!=UiPage::Confirm&&!raceSection)c.panel(s.page==UiPage::Title||s.page==UiPage::Intro?"title_scene":s.page==UiPage::MainMenu||s.page==UiPage::License?"title_blur_scene":"background");
+ const bool sharpTitle=s.page==UiPage::Title||s.page==UiPage::Intro,blurTitle=s.page==UiPage::MainMenu||s.page==UiPage::License;
+ const Name titleScene(sharpTitle?"title_scene_":"title_blur_scene_",TitleVariants[std::min(s.titleVariant,4u)]);
+ if(s.page!=UiPage::Confirm&&!raceSection)c.panel(sharpTitle||blurTitle?titleScene.c_str():"background");
  // MenuBG's eAFLoop (bg_Loop.brlan) translates line0's texture by T 0..100
  // over 3500 frames; line0 repeats every 8 layout units (v 0..160 across its
  // 1280-unit height), so the stripes rise 8*T units. The cooked panel is that
@@ -745,24 +750,35 @@ static void composeMenuImpl(const MenuState& s,const UiRaceView& race,std::vecto
  }
  // RaceMenuPage_onInit (PAL 0x80858D60) creates only the list's PushButtons,
  // each at its own variant's 16:9 pose (button/ctrl/PauseMenu*.brctr), over
- // the frozen race: no obi, title or Back button. Captions are BMG 0x3EB-0x3EF;
- // the menu cook has no "Continue Game" / "Quit Game" (0x3EB/0x3EC), so those
- // two show the cooked "Continue" / "Quit" until it does. The PadInfo
- // controller diagram (sections 0x1E/0x20/0x24/0x28) is not cooked.
+ // the frozen race: no obi, title or Back button. Captions are the brctr's
+ // BMG 0x3EB-0x3EF. In sections 0x1E (GP), 0x20/0x24 (VS) and 0x28 (Battle),
+ // not Time Trials, it adds game_image PadInfo for the controller type, here
+ // PadInfoClassic: item 0x5DC, handle 0x5DD, accel 0x5DE and brake 0x5DF
+ // "Brake/Drift", or 0x5E0 "Brake" when the controller drifts automatically
+ // (KPadController +0x51).
  case UiPage::Pause:{
   const char* variants[]={"ButtonContinue","ButtonQuit","ButtonRestart","ButtonChangeCourse","ButtonChangeCharacter"};
-  const char* captions[]={"Continue","Quit","Restart","Change Course","Change Character"};
+  const char* captions[]={"Continue Game","Quit Game","Restart","Change Course","Change Character"};
   for(unsigned i=0;i<s.count();++i){const auto b=unsigned(uiPauseButton(s.selection.mode,i));
    c.button("button",i,control(uiPauseMenuControl(s),variants[b]),captions[b]);}
+  if(s.selection.mode!=UiMode::TimeTrials){
+   const Pose pad=control("PadInfoClassic","PadInfoClassic");c.panel("pad_info",pad);
+   c.text("Use Item","pad_info",pad,0xffffffff,"item");c.text("Steer","pad_info",pad,0xffffffff,"handle");
+   c.text("Accelerate","pad_info",pad,0xffffffff,"accel");c.text(s.selection.automatic?"Brake":"Brake/Drift","pad_info",pad,0xffffffff,"brake");
+  }
   break;
  }
  // Page 0x2C (ctor PAL 0x806250F0): AfterMenuEndConfirm's ButtonConfirmContinue
  // and ButtonConfirmQuit (ids 23/24, BMG 0x3E9 "Continue" / 0x3EA "Quit") under
- // RaceMessageWindow with BMG 0x44D. That control is not in the menu cook: its
- // 16:9 poses and start frames are the brctr's, and its common_w004_menu
- // animations are the pause controls' (the same nine brlan files). The message
- // window (game_image race_message_half) and BMG 0x44D are not cooked.
+ // RaceMessageWindow (game_image race_message_half) with BMG 0x44D. The buttons'
+ // control is not in the menu cook: its 16:9 poses and start frames are the
+ // brctr's, and its common_w004_menu animations are the pause controls' (the
+ // same nine brlan files). Page 0x2C exists only in the GP section (0x1E).
  case UiPage::QuitConfirm:{
+  if(s.selection.mode==UiMode::GrandPrix){
+   const Pose window=control("RaceMessageWindow","MessageWindow");
+   c.panel("race_message",window);c.text("Are you sure you want to quit?","race_message",window);
+  }
   constexpr struct {float y,delay;const char* caption;} buttons[2]={{-150.f,4.f,"Continue"},{-75.f,2.f,"Quit"}};
   for(unsigned i=0;i<2;++i){auto p=control(uiPauseMenuControl(s),"ButtonContinue");p.x=0;p.y=buttons[i].y;p.delay=buttons[i].delay;
    c.button("button",i,p,buttons[i].caption);}

@@ -128,6 +128,9 @@ def material_state(shape):
         # Doubled texture product (sea sparkles): alpha mode 6.
         if alpha_scale == 2 and expression == {('p','q'): 1.}:
             return flags|(6<<20), 1., False, limitation, None, extended
+        # Doubled single texture alpha (Fire Snake flames): alpha mode 7.
+        if alpha_scale == 2 and expression == {('p',): 1.}:
+            return flags|(7<<20), 1., False, limitation, None, extended
         # A final GX divide-by-two is exact for a nonnegative monomial:
         # move its scale into the cooked vertex multiplier. Texture alpha is
         # still sampled at runtime; additive road overlays use raster alpha.

@@ -90,6 +90,14 @@ public:
  // Results is the retail VS end-of-race menu (VSRaceEnd): Next Race / Quit
  // Game, or only Next after the final race of a VS set (IsFinalRace).
  bool finalRace=false;
+ // TitlePage_onInit (PAL 0x8063AB6C) with unlock flag 0x38 set, as every unlock
+ // is here: entering the title section (Title, License, MainMenu) draws title
+ // variant 0-4 again, never the last one (Util::Random nextU32(5); the last one
+ // lives in the section context +0x4C8, -1 at boot). It selects the title
+ // picture, TitleBack's blurred license/main-menu picture and the title voice.
+ // One seed per boot: every copy draws as the real state will (prefetching).
+ static uint32_t titleSeed();
+ unsigned titleVariant=1;int lastTitleVariant=-1;uint32_t titleRandom=titleSeed();
  UiFocusState focus{};
  UiAction input(UiInput);
  void advance(unsigned ticks);

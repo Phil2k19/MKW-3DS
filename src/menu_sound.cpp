@@ -9,12 +9,6 @@ using namespace snd;
 constexpr std::uint16_t BgmSlots[2] = {1, 2};
 constexpr std::uint16_t VoiceSlot = 3;
 constexpr std::uint16_t TitleVoiceSlot = 4;   // the menu character manager's title handle (+0x14)
-// SWITCH (Phil, 2026-10-22): the cooked set has one title picture, "mario2" = title variant 1
-// (tools/cook_menu_ui.py ui_title_scene / ui_title_blur_scene). Until the other four are
-// cooked the title variant stays 1 (Mario's lines, with retail's rare-line rule), so the voice
-// matches the picture. Set to false in the re-cook batch, together with the per-variant
-// pictures, to restore TitlePage_onInit's random 1-of-5 pick.
-constexpr bool OnlyMario2TitlePictureCooked = true;
 // Retail page ids (Section::CreatePageById jump table, 805f24dc).
 int retailPage(UiPage page) {
  switch (page) {
@@ -198,7 +192,7 @@ void MenuSound::startBgm(UiPage page) {
  if (layer == 5) volume_.set(0.55f, 30);
 }
 
-void MenuSound::enterSection(Section next, UiPage page) {
+void MenuSound::enterSection(Section next, const MenuState& visual) {
  auto& sound = SoundSystem::instance();
  // MenuRSARPlayer::Stop (8070e198): the old BGM fades over 20 frames.
  if (bgm_ != 0xFFFFFFFF) sound.stopSlot(slot_, 20);
@@ -209,13 +203,10 @@ void MenuSound::enterSection(Section next, UiPage page) {
  loadSections(groupOf(next), 0xFFFFFFFF, 400);
  loaded_ = next;
  pendingStart_ = next == Section::Title || next == Section::Single ? 1 : -1;
- (void)page;
- // TitlePage_onInit (PAL 0x8063ACD8..0x8063AD24) with unlock flag 0x38 set: a title
- // variant 0-4 other than the last one (Util::Random nextU32(5)).
+ // TitlePage_onInit's variant (PAL 0x8063AB6C, drawn by MenuState::enter): the same one
+ // picks the title picture and the blurred license/main-menu picture.
  if (next == Section::Title) {
-  if (OnlyMario2TitlePictureCooked) title_.variant = 1;   // see the switch at the top
-  else do title_.variant = int(title_.random(5)); while (title_.variant == title_.lastVariant);
-  title_.lastVariant = title_.variant;
+  title_.variant = int(visual.titleVariant);
   title_.active = false;
  }
 }
@@ -270,7 +261,7 @@ void MenuSound::frame(const MenuState& visual, bool revealed, unsigned steps) {
  // After a race (engine restarted, no section) the menu groups load at once,
  // before the page's textures fill LINEAR: BNK_VO_MENU needs one 1.28 MB block
  // and failed to fit behind them (no menu voices). The BGM still waits for the page.
- if ((revealed || section_ == Section::None) && next != section_ && next != Section::Race) enterSection(next, visual.page);
+ if ((revealed || section_ == Section::None) && next != section_ && next != Section::Race) enterSection(next, visual);
  if (pendingStart_ > 0 && revealed && sound.sceneReady()) { pendingStart_ = -1; startBgm(visual.page); }
  // TitlePage_onActivate (PAL 0x8063AD64), once each time the title page comes on screen.
  if (visual.page != UiPage::Title) title_.active = false;

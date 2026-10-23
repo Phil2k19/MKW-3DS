@@ -1,9 +1,13 @@
 #include <mkw/menu_ui.hpp>
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 
 namespace mkw {
 namespace {
+// The title sections (0x3F-0x44): TitleBack on the license and main-menu pages
+// reads the title page's variant, so it lasts until the section is left.
+bool titleSection(UiPage p){return p==UiPage::Title||p==UiPage::License||p==UiPage::MainMenu;}
 constexpr unsigned KartChoices[]={0,1,2,6,7,8};
 constexpr unsigned BikeChoices[]={3,4,5,9,10,11};
 // Each row pairs a kart and bike, in the original machine family order.
@@ -133,10 +137,18 @@ UiInput UiDirectionRepeat::step(bool up,bool down,bool left,bool right,unsigned 
 
 void MenuState::advance(unsigned ticks){age+=ticks;focusAge+=ticks;sectionAge+=ticks;uiFocusAdvance(*this,ticks);}
 
+// Retail seeds Util::Random from the clock.
+uint32_t MenuState::titleSeed(){static const uint32_t seed=uint32_t(std::time(nullptr))*2654435761u|1u;return seed;}
+
 void MenuState::enter(UiPage next){
  normalize(selection);
  // Leaving the race (results, pause) is a section change: a new MenuBG.
  if(retainsRaceAssets())sectionAge=0;
+ // TitlePage_onInit (PAL 0x8063ACD8..0x8063AD24): a new title variant, never the last.
+ if(titleSection(next)&&!titleSection(page)){
+  do{titleRandom^=titleRandom<<13;titleRandom^=titleRandom>>17;titleRandom^=titleRandom<<5;titleVariant=titleRandom%5;}while(int(titleVariant)==lastTitleVariant);
+  lastTitleVariant=int(titleVariant);
+ }
  page=next;age=focusAge=0;unavailable=false;cursor=0;
  switch(page){
  case UiPage::License:cursor=selection.license;break;

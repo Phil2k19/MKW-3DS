@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -26,9 +27,13 @@ WORLD = {
     1: ("koura_red", "koura_red", None),
     2: ("banana", "banana", None),
     3: ("itemBoxNiseRtpa", "itemBoxNise", None),
+    # Dropped Mushrooms (Goombas, crates, a hit racer's inventory): ItemObjKinoko.
+    4: ("kinoko", "kinoko", None),
     6: ("bomb", "bomb", "wait_a"),
     7: ("togezo_koura", "togezo_koura", "fly"),
     9: ("star", "star", None),
+    # The Blooper drawn on a screen (GessoScreen; clips start, attack, attack_end).
+    12: ("gesso", "gesso", "start"),
     13: ("pow_bloc_plane", "pow_bloc_plane", "attack1"),
     14: ("kumo", "kumo", "kumo"),
     15: ("kart_killer", "kart_killer", "wait"),
@@ -222,6 +227,229 @@ def sparkle_levels(name, model, output, groups=3):
     return centres
 
 
+def _be(fmt, data, offset):
+    return struct.unpack_from(">" + fmt, data, offset)[0]
+
+
+def _resource_group(data, group):
+    """An NW4R resource dictionary: {name: absolute offset}."""
+    def name(offset):
+        return data[offset:data.index(b"\0", offset)].decode("latin1")
+    return {name(group + _be("I", data, group + 24 + 16 * i + 8)): group + _be("I", data, group + 24 + 16 * i + 12)
+            for i in range(_be("I", data, group + 4))}
+
+
+def _brres_entry(data, kind, name):
+    root = _resource_group(data, _be("H", data, 0x0C) + 8)
+    return _resource_group(data, root[kind])[name]
+
+
+def clr0_track(data, clip, material, target):
+    """(frames, loop, mask, 0xRRGGBBAA per frame) of one CLR0 colour track (nw4r ResAnmClr;
+    targets in flag order MAT0 MAT1 AMB0 AMB1 C0 C1 C2 K0..K3)."""
+    targets = ("MAT0", "MAT1", "AMB0", "AMB1", "C0", "C1", "C2", "K0", "K1", "K2", "K3")
+    a = _brres_entry(data, "AnmClr(NW4R)", clip)
+    if _be("I", data, a + 8) != 4:
+        raise ValueError("Unexpected CLR0 version: " + clip)
+    frames, loop = _be("H", data, a + 0x20), _be("I", data, a + 0x24)
+    m = _resource_group(data, a + _be("I", data, a + 0x10))[material]
+    flags, p = _be("I", data, m + 4), m + 8
+    for i, t in enumerate(targets):
+        f = (flags >> (2 * i)) & 3
+        if not f & 1:
+            continue
+        if t == target:
+            if f & 2:
+                raise ValueError("Constant CLR0 track: %s %s" % (clip, material))
+            track = p + 4 + _be("i", data, p + 4)
+            return frames, loop, _be("I", data, p), [_be("I", data, track + 4 * k) for k in range(frames + 1)]
+        p += 8
+    raise ValueError("Missing CLR0 track %s %s %s" % (clip, material, target))
+
+
+def chr0_root_translation(data, clip, node):
+    """A CHR0 node's translation at frame 0 (noclip parseCHR0_NodeData track layout)."""
+    a = _brres_entry(data, "AnmChr(NW4R)", clip)
+    n = _resource_group(data, a + _be("I", data, a + 0x10))[node]
+    flags, p = _be("I", data, n + 4), n + 8
+    if not flags & 0x8a:              # scale exists: one uniform or three tracks
+        p += 4 if flags & 0x10 else 12
+    if not flags & 0x126:             # rotation exists
+        p += 12
+    if flags & 0x246:                 # no translation
+        return (0.0, 0.0, 0.0)
+    fmt, out = (flags >> 30) & 3, []
+    for axis in range(3):
+        if flags & (1 << (19 + axis)) or fmt == 0:
+            out.append(_be("f", data, p))
+        else:
+            k = n + _be("I", data, p)
+            first = {1: lambda: data[k + 16], 2: lambda: _be("h", data, k + 16), 3: lambda: _be("f", data, k + 8)}[fmt]()
+            if first != 0:
+                raise ValueError("First CHR0 key is not at frame 0: " + clip)
+            out.append({1: lambda: (_be("H", data, k + 17) >> 4) * _be("f", data, k + 8) + _be("f", data, k + 12),
+                        2: lambda: _be("H", data, k + 18) * _be("f", data, k + 8) + _be("f", data, k + 12),
+                        3: lambda: _be("f", data, k + 12)}[fmt]())
+        p += 4
+    return tuple(out)
+
+
+def dskm_palette_index(bank, clip, translation):
+    """The palette matrix of a cooked DSKM whose translation at the clip's frame 0 is
+    `translation`: a root joint bound at the origin (its palette matrix is its world matrix)."""
+    version, vertices, matrices, clips, shapes = struct.unpack_from("<5I", bank, 4)
+    cursor = (32 if version == 5 else 28) + vertices * 28 + shapes * 8
+    for _ in range(clips):
+        name = bank[cursor:cursor + 32].rstrip(b"\0").decode()
+        count = struct.unpack_from("<I", bank, cursor + 40)[0]
+        cursor += 44
+        if name == clip:
+            hits = [i for i in range(matrices) if all(abs(struct.unpack_from("<f", bank, cursor + i * 84 + 4 * (3 + 4 * r))[0] - translation[r]) < 1e-3 for r in range(3))]
+            if len(hits) != 1:
+                raise ValueError("Root palette matrix not unique in " + clip)
+            return hits[0]
+        cursor += count * (matrices * 84 + shapes * 4)
+    raise ValueError("Missing DSKM clip " + clip)
+
+
+def srt0_rows(srt0, clip, material, texture):
+    """Per frame, the GX texture matrix rows (a b tx / c d ty, Maya mode, noclip
+    calcTexMtx_Maya) of one SRT0 texture, in cooked UV space (v = 1 - t on both sides)."""
+    anim = next(a for a in srt0 if a["name"] == clip)
+    if anim.get("texMtxMode", 0) != 0:
+        raise ValueError("Only Maya SRT0 is supported: " + clip)
+    tex = next(m for m in anim["matAnimations"] if m["materialName"] == material)["texAnimations"][texture]
+
+    def sample(track, default, frame):
+        if track is None:
+            return default
+        if track["type"] == 0:
+            values = [track["frames"][k] for k in sorted(track["frames"], key=int)]
+            return values[min(frame, len(values) - 1)]
+        keys = track["frames"]
+        if len(keys) == 1 or frame <= keys[0]["frame"]:
+            return keys[0]["value"]
+        if frame >= keys[-1]["frame"]:
+            return keys[-1]["value"]
+        i = next(i for i, k in enumerate(keys) if frame < k["frame"])
+        k0, k1 = keys[i - 1], keys[i]
+        length = k1["frame"] - k0["frame"]
+        t = (frame - k0["frame"]) / length
+        p0, p1, s0, s1 = k0["value"], k1["value"], k0["tangent"] * length, k1["tangent"] * length
+        return (2 * p0 - 2 * p1 + s0 + s1) * t ** 3 + (-3 * p0 + 3 * p1 - 2 * s0 - s1) * t ** 2 + s0 * t + p0
+
+    rows = []
+    for frame in range(anim["duration"]):
+        ss, st = sample(tex["scaleS"], 1.0, frame), sample(tex["scaleT"], 1.0, frame)
+        r = math.radians(sample(tex["rotation"], 0.0, frame))
+        ts, tt = sample(tex["translationS"], 0.0, frame), sample(tex["translationT"], 0.0, frame)
+        c, s = math.cos(r), math.sin(r)
+        a, b, tx = ss * c, ss * s, ss * (-0.5 * c - (0.5 * s - 0.5) - ts)
+        cc, d, ty = st * -s, st * c, st * (-0.5 * c + (0.5 * s - 0.5) + tt) + 1.0
+        rows.append([a, -b, b + tx, -cc, d, 1 - d - ty])
+    return anim["duration"], anim["loopMode"], rows
+
+
+def item_material_anims(output):
+    """include/mkw/item_material_anims.hpp: the retail CLR0 / SRT0 tracks and TEV terms of
+    the world items that their cooked materials do not hold (src/race_hud.cpp draws them)."""
+    common, exports = ROOT / "assets/common", ROOT / "assets/race-items"
+
+    def export(ident):
+        folder = exports / ("item_" + str(ident))
+        model = json.loads((folder / "model.json").read_text())
+        materials = {m["name"]: m for entry in json.loads((folder / "materials.json").read_text()) for m in entry["materials"]}
+        shapes = [s["material"] for m in model["models"] for s in m["shapes"]]
+        textures = [t["name"] for t in model["textures"]]
+        return folder, shapes, textures, materials
+
+    def stage(material, i):
+        s = material["gxMaterial"]["tevStages"][i]
+        return (s["colorInA"], s["colorInB"], s["colorInC"], s["colorInD"]), s
+
+    def rgba(c):
+        return (round(c["r"] * 255) << 24 | round(c["g"] * 255) << 16 | round(c["b"] * 255) << 8 | round(c["a"] * 255)) & 0xffffffff
+
+    out, receipt = [], {}
+
+    def colors(name, ident, archive, clip, material, target, register, at, d_input):
+        _, shapes, _, materials = export(ident)
+        if shapes.count(material) != 1:
+            raise ValueError("Expected one %s shape in item %d" % (material, ident))
+        inputs, _ = stage(materials[material], at)
+        if inputs[3] != d_input:
+            raise ValueError("%s: GX %s no longer the added term" % (material, target))
+        data = (common / (archive + ".brres")).read_bytes()
+        frames, loop, mask, words = clr0_track(data, clip, material, target)
+        base = rgba(materials[material]["colorRegisters"][register])
+        out.extend(["// CLR0 %s, material %s, GX %s (0xRRGGBBAA, masked with the material's own register)." % (clip, material, target),
+                    "inline constexpr unsigned %sSubmesh=%d;" % (name, shapes.index(material)),
+                    "inline constexpr uint32_t %sMask=0x%08xu,%sBase=0x%08xu;" % (name, mask, name, base),
+                    "inline constexpr bool %sLoop=%s;" % (name, "true" if loop else "false"),
+                    "inline constexpr std::array<uint32_t,%d> %sColors{{" % (len(words), name)]
+                   + ["    " + ",".join("0x%08xu" % w for w in words[i:i + 8]) + "," for i in range(0, len(words), 8)] + ["}};"])
+        receipt[name] = {"clip": clip, "material": material, "target": target, "frames": frames, "loop": loop, "mask": mask}
+
+    # Bob-omb b_body: C2 + TEXC*RASC (fn_1_294F8C holds CLR "bomb" at its glow frame).
+    colors("BombGlow", 6, "bomb", "bomb", "b_body", "C2", 3, 0, 6)
+    # Thunder Cloud kumo_body_m: albedo stage C1 + TEXC*P (fn_1_29EFE8, frame +0x1CC).
+    colors("CloudFlash", 14, "kumo", "kumo", "kumo_body_m", "C1", 2, 1, 4)
+
+    # POW pow_bloc_dark stage 1: CPREV + C2 * pow_bloc_light at texgen 1 (TEX0 through
+    # texture SRT 1), the SRT0 PowScreen 1 plays (fn_1_2A1B38: index 1 at rate 2).
+    folder, shapes, textures, materials = export(13)
+    dark = materials["pow_bloc_dark"]
+    inputs, s1 = stage(dark, 1)
+    gen = dark["gxMaterial"]["texGens"][s1["texCoordId"]]
+    if (inputs != (15, 6, 8, 0) or dark["samplers"][s1["texMap"]]["name"] != "pow_bloc_light" or gen["source"] != 4
+            or dark["texSrts"][s1["texCoordId"]]["mapMode"] != 0 or s1["texCoordId"] != 1 or dark["samplers"][s1["texMap"]]["wrapS"] != 1
+            or dark["samplers"][s1["texMap"]]["wrapT"] != 1 or shapes.count("pow_bloc_dark") != 1):
+        raise ValueError("Unexpected pow_bloc_dark light stage")
+    # Texgen 1 reads TEX0: the cooked UV1 must be the shape's own UV0.
+    model = json.loads((folder / "model.json").read_text())
+    dark_vertices = next(s for m in model["models"] for s in m["shapes"] if s["material"] == "pow_bloc_dark")["vertices"]
+    if any(v[6:8] != v[8:10] for v in dark_vertices):
+        raise ValueError("pow_bloc_dark UV1 differs from UV0")
+    duration, loop, rows = srt0_rows(json.loads((folder / "srt0.json").read_text()), "pow_bloc_plane", "pow_bloc_dark", 1)
+    if not loop:
+        raise ValueError("Expected a looping pow_bloc_plane SRT0")
+    c2 = dark["colorRegisters"][3]
+    out.extend(["// POW pow_bloc_dark stage 1: CPREV + C2 * pow_bloc_light (repeat) at texcoord 1, the",
+                "// SRT0 pow_bloc_plane texture 1 per frame (rows a b tx / c d ty in cooked UV space).",
+                "inline constexpr unsigned PowLightSubmesh=%d,PowLightTexture=%d;" % (shapes.index("pow_bloc_dark"), textures.index("pow_bloc_light")),
+                "inline constexpr uint32_t PowLightColor=0x%08xu;" % rgba({**c2, "a": 1}),
+                "inline constexpr std::array<std::array<float,6>,%d> PowLightUV{{" % duration]
+               + ["    {{" + ",".join("%.9ff" % (v + 0.0) for v in r) + "}}," for r in rows] + ["}};"])
+    receipt["PowLight"] = {"frames": duration, "color": rgba({**c2, "a": 1})}
+
+    # Mushroom kinoko stage 1: CPREV + RASC * kinoko_spe (EnvCamera, texture SRT 1).
+    folder, shapes, textures, materials = export(4)
+    kinoko = materials["kinoko"]
+    i0, _ = stage(kinoko, 0)
+    i1, s1 = stage(kinoko, 1)
+    gen, srt = kinoko["gxMaterial"]["texGens"][s1["texCoordId"]], kinoko["texSrts"][s1["texCoordId"]]
+    if (i0 != (15, 8, 10, 15) or i1 != (15, 10, 8, 0) or gen["source"] != 1 or srt["mapMode"] != 1
+            or kinoko["samplers"][s1["texMap"]]["name"] != "kinoko_spe" or shapes != ["kinoko"]):
+        raise ValueError("Unexpected kinoko specular stage")
+    m = srt["srtMtx"]
+    out.extend(["// Mushroom kinoko stage 1: CPREV + RASC * kinoko_spe (clamp), EnvCamera through texture SRT 1",
+                "// (GX rows a b tx / c d ty for Renderer::setEnvironmentUv).",
+                "inline constexpr unsigned MushroomSpecularSubmesh=0,MushroomSpecularTexture=%d;" % textures.index("kinoko_spe"),
+                "inline constexpr float MushroomSpecularSRT[6]={%s};" % ",".join("%.9ff" % m[str(k)] for k in (0, 4, 12, 1, 5, 13))])
+
+    # Blooper: skl_root (node 0) carries attack_end's offset (fn_1_2988DC); its palette matrix.
+    data = (common / "gesso.brres").read_bytes()
+    root = dskm_palette_index((output / "models/item_12.dskm").read_bytes(), "attack", chr0_root_translation(data, "attack", "skl_root"))
+    out.extend(["// Blooper: the palette matrix of gesso's skl_root in models/item_12.dskm.",
+                "inline constexpr unsigned GessoRootMatrix=%d;" % root])
+
+    (ROOT / "include/mkw/item_material_anims.hpp").write_text("\n".join(
+        ["#pragma once", "#include <array>", "#include <cstdint>", "namespace mkw {",
+         "// Generated by tools/cook_race_items.py from the item archives (Common.szs) and their exported",
+         "// materials: retail material animation the cooked item materials do not hold."] + out + ["}", ""]))
+    return receipt
+
+
 def write_header(manifest):
     def sprites(name, count, records):
         lines = [f"inline constexpr std::array<RaceSprite,{count}> {name}{{{{"]
@@ -275,6 +503,7 @@ def main():
         manifest["itemBox"]["runtimeUVAnimation"] = {"source": "itembox and itemBoxNise SRT0 and materials", "frames": 300,
                                                      "header": "include/mkw/item_box_uv.hpp"}
         manifest["startSignal"] = cook_world(common / "jugemu_signal.brres", "jugemu_signal", "start_signal", None, args.output)
+        manifest["itemMaterialAnimations"] = item_material_anims(args.output)
     ui = ROOT / "assets/race-ui/Race/game_image/timg"
     localized = ROOT / "assets/race-ui/Race_U/game_image/timg"
     for ident, source in ICONS.items():

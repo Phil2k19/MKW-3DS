@@ -8,6 +8,7 @@
 // (RaceEffects) at track load, so they step, draw and share the pools with every other
 // race effect; step() then follows retail's per-object emission from Kinoko's object state.
 // Presentation only: nothing here feeds race or replay state.
+#include "mkw/race_effects.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -39,7 +40,7 @@ inline bool appendRefxTable(std::vector<uint8_t>& base,const std::vector<uint8_t
     auto be16=[](const uint8_t* p){return uint32_t(p[0])<<8|p[1];};
     auto putBe32=[](uint8_t* p,uint32_t v){p[0]=uint8_t(v>>24);p[1]=uint8_t(v>>16);p[2]=uint8_t(v>>8);p[3]=uint8_t(v);};
     Head bh,eh;
-    if(!header(base,bh)||!header(extra,eh)||!eh.emitters||bh.emitters+eh.emitters>255||bh.textures+eh.textures>96)return false;
+    if(!header(base,bh)||!header(extra,eh)||!eh.emitters||bh.emitters+eh.emitters>RaceEffects::MaxEmitters||bh.textures+eh.textures>RaceEffects::MaxTextures)return false;
     const size_t at=(size_t(bh.blob)+3)&~size_t(3); // the payload's offset in the merged one
     if(at+eh.blob>(1u<<20))return false;
     const uint8_t* et=extra.data()+sizeof eh;

@@ -93,7 +93,7 @@ bool RaceEffects::loadMemory(const void* bytes,size_t size){
     if(size<20)return false;
     const auto* file=static_cast<const uint8_t*>(bytes);
     uint32_t h[5]{};std::memcpy(h,file,sizeof h);
-    bool ok=!std::memcmp(h,"REFX",4)&&h[1]==3&&h[2]>0&&h[2]<=255&&h[3]<=96&&h[4]<=(1u<<20);
+    bool ok=!std::memcmp(h,"REFX",4)&&h[1]==3&&h[2]>0&&h[2]<=MaxEmitters&&h[3]<=MaxTextures&&h[4]<=(1u<<20);
     struct Record { char name[32]; uint32_t desc,ptcl; uint16_t texture[3],ptclTracks,ptclInit,emitTracks,emitInit,ptclSize,pad[2]; uint32_t list; };
     static_assert(sizeof(Record)==64,"REFX record");
     if(!ok)return false;

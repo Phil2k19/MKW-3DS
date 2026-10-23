@@ -13,6 +13,7 @@
 #include <mkw/thunder_cloud.hpp>
 #include <mkw/item_rules.hpp>
 #include <mkw/item_visual.hpp>
+#include <mkw/item_material_anims.hpp>
 #include <game/kart/KartMove.hh>
 #include <mkw/race_assets.hpp>
 #include <mkw/renderer.hpp>
@@ -407,6 +408,88 @@ void stepChase(ChaseIcon& c,const RaceItems& items,const HudCamera& camera){
     chaseAdvance(ChaseFade,c.fade,c.fadeFrame,.75f);
     int loop=0;chaseAdvance(ChaseRoop,loop,c.roopFrame,c.roopRate);chaseAdvance(ChaseZoom,loop,c.zoomFrame,c.zoomRate);
 }
+// A CLR0 colour track (tools/cook_race_items.py, item_material_anims.hpp) held at `frame`
+// (the AnmObj "set frame and stop"): each channel lerped between its integer frames, the
+// material's own register kept where the track's mask is set. Returns the TEV constant
+// (0xAABBGGRR) the renderer's SubmeshOverride::Add takes.
+template<std::size_t N> uint32_t clrColor(const std::array<uint32_t,N>& track,uint32_t mask,uint32_t base,float frame){
+    frame=std::clamp(frame,0.f,float(N-1));
+    const unsigned a=unsigned(frame),b=std::min<unsigned>(a+1,N-1);const float t=frame-float(a);
+    uint32_t c=0;
+    for(unsigned shift=0;shift<32;shift+=8){
+        const float x=float((track[a]>>shift)&255),y=float((track[b]>>shift)&255);
+        c|=uint32_t(std::lround(x+(y-x)*t))<<shift;
+    }
+    c|=base&mask;
+    return (c>>24)|((c>>8)&0xff00u)|((c<<8)&0xff0000u)|((c<<24)&0xff000000u);
+}
+// Draw one model with a CLR0 colour added to one submesh (GX: the animated register is the
+// clamped stage's d input; added after the clamped stages, the same for a non-negative colour,
+// the path the Star CLR0 takes).
+void drawAdded(Renderer& renderer,const Model& model,const C3D_Mtx& t,unsigned submesh,uint32_t color){
+    if(!(color&0xffffffu)||submesh>=model.submeshes.size()){renderer.draw(model,t);return;}
+    std::array<SubmeshOverride,4> o{};
+    o[submesh].flags=SubmeshOverride::Add;o[submesh].add=color;
+    renderer.setOverrides(o.data(),submesh+1);
+    renderer.draw(model,t);
+    renderer.setOverrides(nullptr,0);
+}
+// ItemObjBomb (PAL fn_1_294F8C 0x807A5340): the wait_b walk rate from the fuse (+0x1DC):
+// 1 down to 180, then to 2 at 120 (0x808A55B4 / 0x808A55B8), 2 at 60 to 3.6 at 30
+// (0x808A55AC, 0x808A5504, 0x808A55A8, 0x808A55B0).
+float bombWalkRate(int fuse){
+    const float f=float(fuse);
+    if(fuse>=180)return 1.f;
+    if(fuse>=60)return std::clamp(1.f+(f-180.f)/(120.f-180.f),1.f,2.f);
+    return std::clamp(2.f+1.6f*(f-60.f)/(30.f-60.f),2.f,3.6f);
+}
+// The same function's fuse glow, the CLR "bomb" frame (+0x1C8): it rises by `step` while the
+// flash counter (+0x1E0) is in the last `period` frames of its run and falls otherwise,
+// within [0, 20] (0x808A555C, 0x808A559C..0x808A55A4, 0x808A5520, 0x808A5528, 0x808A5550).
+float bombGlow(float glow,int counter,int fuse){
+    const float f=float(fuse);
+    const float period=std::clamp(4.f+8.f*(f-10.f)/(100.f-10.f),4.f,12.f);
+    const float step=std::clamp(2.f+8.f*(f-100.f)/(10.f-100.f),2.f,10.f);
+    if(counter==0||period<=float(counter))return std::max(0.f,glow-step);
+    return std::min(20.f,glow+step);
+}
+// ObjKumo (fn_1_29F3B8 0x807AF76C): the CLR "kumo" frame (+0x1CC) after the timer (+0x1D8,
+// 0 at activation, the strike at 600) advanced. In a flash frame of the second (the groups
+// the audio's cloudFlash also uses) it rises by 2.5..3.5, otherwise falls by 2..3, within
+// [0, 15]; after the strike it falls by 0.4 (0x808A5EA0..0x808A5F04, 0x808A5F24, 0x808A5F3C).
+float cloudFlashFrame(float frame,unsigned timer){
+    static constexpr int Groups[10]={0,1,1,1,2,2,2,3,3,4},Length[5]={6,6,5,5,5},Spacing[5]={15,15,14,13,13},Fall[5]={2,2,3,3,2};
+    static constexpr float Rise[5]={2.5f,2.5f,3.f,3.5f,3.5f};
+    if(timer>=600)return std::max(0.f,frame-.4f);
+    const int groups=std::min(Groups[std::min<unsigned>(timer/60,9)],4),second=int(timer%60);
+    for(int g=0;g<groups;++g)for(int f=0;f<Length[groups];++f)
+        if(second==f+g*Spacing[groups]||(groups==4&&f==second%Spacing[groups]))return std::min(15.f,frame+Rise[groups]);
+    return std::max(0.f,frame-float(Fall[groups]));
+}
+// pow_bloc_dark (pow_bloc_plane.brres): GX stage 1 adds C2 * pow_bloc_light (repeat), read at
+// texcoord 1 through the SRT0 the Uv override carries. Stage 0 and the alpha stay the cooked
+// material's (TEXC*RASC, TEXA*RASA with the konst-2 alpha baked).
+struct PowMaterial { const Model* model; };
+void bindPowLight(void* context,std::size_t submesh){
+    const auto& m=*static_cast<PowMaterial*>(context);
+    if(submesh!=PowLightSubmesh||PowLightTexture>=m.model->textures.size())return;
+    auto* light=&m.model->textures[PowLightTexture]->gpu;C3D_TexSetWrap(light,GPU_REPEAT,GPU_REPEAT);C3D_TexBind(1,light);
+    const uint32_t c=PowLightColor;
+    auto* e1=C3D_GetTexEnv(1);
+    C3D_TexEnvColor(e1,(c>>24)|((c>>8)&0xff00u)|((c<<8)&0xff0000u)|0xff000000u);
+    C3D_TexEnvSrc(e1,C3D_RGB,GPU_TEXTURE1,GPU_CONSTANT,GPU_PREVIOUS);C3D_TexEnvFunc(e1,C3D_RGB,GPU_MULTIPLY_ADD);
+}
+// kinoko (kinoko.brres): GX stage 1 adds the lit raster colour * kinoko_spe (clamp), an
+// EnvCamera map through texture SRT 1 (the renderer's environment UV, as bindBox).
+struct MushroomMaterial { Renderer* renderer; const Model* model; C3D_Mtx transform; };
+void bindMushroom(void* context,std::size_t submesh){
+    auto& m=*static_cast<MushroomMaterial*>(context);
+    if(submesh!=MushroomSpecularSubmesh||MushroomSpecularTexture>=m.model->textures.size())return;
+    m.renderer->setEnvironmentUv(m.transform,MushroomSpecularSRT);
+    auto* spe=&m.model->textures[MushroomSpecularTexture]->gpu;C3D_TexSetWrap(spe,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);C3D_TexBind(1,spe);
+    auto* e1=C3D_GetTexEnv(1);
+    C3D_TexEnvSrc(e1,C3D_RGB,GPU_TEXTURE1,GPU_PRIMARY_COLOR,GPU_PREVIOUS);C3D_TexEnvFunc(e1,C3D_RGB,GPU_MULTIPLY_ADD);
+}
 }
 struct RaceHud::Impl {
     std::array<std::unique_ptr<Model>,21> models;
@@ -422,6 +505,24 @@ struct RaceHud::Impl {
     std::array<Wings,RaceItems::MaxActors> blueWings{};
     std::array<float,12> bulletFrame{};
     int blueFly=0,bulletWait=0;
+    // Each Bob-omb object by actor slot (ItemObjBomb): its CHR clip (index into bombClips),
+    // frame and rate, the fuse glow (CLR frame +0x1C8), the flash counter (+0x1E0) and the
+    // fuse it last saw. Each racer's tethered Bob-omb plays wait_a from its spawn.
+    enum : uint8_t { WaitA, WaitC, Touchdown, WaitB };
+    struct Bomb { float frame=0,rate=1,glow=0;int counter=0,fuse=0;uint16_t age=0;uint8_t clip=WaitC;bool live=false; };
+    std::array<Bomb,RaceItems::MaxActors> bombs{};
+    std::array<float,12> heldBombFrame{};
+    std::array<bool,12> heldBomb{};
+    std::array<int,4> bombClips{};
+    // Each racer's Thunder Cloud flash (ObjKumo +0x1CC, the CLR "kumo" frame).
+    std::array<float,12> cloudFlash{};
+    // Player 0's GessoScreen (the Blooper drawn on that screen): -1 hidden, 0 start (at the
+    // user's kart), 1 attack, 2 attack_end blended in from attack (frame `from`), carrying
+    // skl_root's model-space offset at the cut. gessoClips: start, attack, attack_end.
+    struct Gesso { int state=-1;float frame=0,from=0;uint8_t user=0;Vec3 root{}; };
+    Gesso gesso;
+    std::array<int,3> gessoClips{};
+    bool lookBack=false;
     std::unique_ptr<Model> box;
     std::unique_ptr<Model> bombCore;
     // Retail drop-shadow volumes (tools/cook_item_shadows.py); optional, as older SD cards
@@ -511,20 +612,32 @@ bool RaceHud::load(){
     for(unsigned i=0;i<21;++i){
         if(ItemModels[i]){impl_->models[i]=model(ItemModels[i]);valid&=bool(impl_->models[i]);}
         if(HudItems[i].path)valid&=impl_->icons[i].load(HudItems[i].path);
-        if((i==6||i==7||i==13||i==14||i==15)&&impl_->models[i]){
+        if((i==6||i==7||i==12||i==13||i==14||i==15)&&impl_->models[i]){
             char path[96];std::snprintf(path,sizeof path,"models/item_%u.dskm",i);
             // Unlit and never environment-mapped, these meshes do not read
             // normals: skin positions only (the same position arithmetic).
             auto animation=std::make_unique<DriverAnimation>();
             if(animation->load(path,*impl_->models[i])){animation->skinNormals(true);impl_->animations[i]=std::move(animation);}
-            // Blue Shells and Bullets animate per object (several at once, each from its own
-            // start): skinned on the GPU with one palette per draw. A rejected GPU setup keeps
-            // the CPU skinning above (one shared pose).
-            if((i==7||i==15)&&impl_->animations[i])impl_->animations[i]->prepareLitSkinning(*impl_->models[i]);
+            // Bob-ombs, Blue Shells and Bullets animate per object (several at once, each from
+            // its own start), the Blooper on its own clock: skinned on the GPU with one palette
+            // per draw. A rejected GPU setup keeps the CPU skinning above (one shared pose).
+            if((i==6||i==7||i==12||i==15)&&impl_->animations[i])impl_->animations[i]->prepareLitSkinning(*impl_->models[i]);
         }
     }
     if(impl_->animations[7])impl_->blueFly=std::max(0,impl_->animations[7]->find("fly"));
     if(impl_->animations[15])impl_->bulletWait=std::max(0,impl_->animations[15]->find("wait"));
+    // ItemObjBomb's CHR clips (anim table 0x808D1B88: 3 wait_a, 4 wait_c, 5 touchdown, 6 wait_b).
+    if(auto* bomb=impl_->animations[6].get()){
+        const char* names[]={"wait_a","wait_c","touchdown","wait_b"};
+        for(unsigned k=0;k<4;++k)impl_->bombClips[k]=std::max(0,bomb->find(names[k]));
+    }
+    // GessoScreen's table (fn_1_2980AC 0x807A8460): 0 start, 1 attack, 2 attack_end. Without
+    // all three (an SD card cooked before the Blooper model) the Blooper stays undrawn.
+    if(auto* gesso=impl_->animations[12].get()){
+        const char* names[]={"start","attack","attack_end"};
+        for(unsigned k=0;k<3;++k)impl_->gessoClips[k]=gesso->find(names[k]);
+        if(!gesso->gpuSkinned()||std::any_of(impl_->gessoClips.begin(),impl_->gessoClips.end(),[](int c){return c<0;}))impl_->animations[12].reset();
+    }
     if(impl_->models[3])bakeMaskUv(*impl_->models[3],FakeBoxMaterials);
     for(unsigned i=1;i<=12;++i)valid&=impl_->ranks[i].load(HudRanks[i].path);
     for(unsigned i=0;i<10;++i)valid&=impl_->digits[i].load(HudDigits[i].path);
@@ -552,12 +665,15 @@ void RaceHud::stepWorld(const RaceItems& items,Vec3 cameraBackward,bool started,
         if(effect.cloud){
             auto& cloud=impl_->clouds[i];const auto& p=kart->pos();const auto& d=kart->move()->dir();
             const Vec3 position{p.x,p.y,p.z};const Vec3 direction=i==0?cameraBackward:Vec3{-d.x,-d.y,-d.z};
+            auto& flash=impl_->cloudFlash[i];
             if(!impl_->previousCloud[i]){
                 // A passed cloud keeps flying from where it was (ItemObjKumo 0x807d8b5c).
-                if(effect.cloudFrom<impl_->clouds.size()){cloud=impl_->clouds[effect.cloudFrom];cloud.transfer();}
-                else cloud.spawn(position,direction);
+                if(effect.cloudFrom<impl_->clouds.size()){cloud=impl_->clouds[effect.cloudFrom];cloud.transfer();flash=impl_->cloudFlash[effect.cloudFrom];}
+                else{cloud.spawn(position,direction);flash=0;}
             }
-            cloud.step(position,direction,CloudDuration-std::min<unsigned>(CloudDuration,effect.cloud));
+            const unsigned age=CloudDuration-std::min<unsigned>(CloudDuration,effect.cloud);
+            cloud.step(position,direction,age);
+            flash=cloudFlashFrame(flash,age);
         }
     }
     for(unsigned i=0;i<impl_->previousCloud.size();++i)impl_->previousCloud[i]=items.hud(i).cloud;
@@ -573,6 +689,70 @@ void RaceHud::stepWorld(const RaceItems& items,Vec3 cameraBackward,bool started,
         if(!wings.live||a.age<wings.age){wings.frame=0;wings.live=true;}
         else wings.frame+=a.guidance.phase==5?0.f:a.guidance.phase==4?1.6f:1.f;
         wings.age=a.age;
+    }
+    // Bob-ombs (ItemObjBomb). The tethered object plays wait_a from its spawn (fn_1_295810
+    // 0x807A5BC4). Every release (throw, drop, eject, inventory drop, course drop) activates it
+    // through fn_1_285E3C (0x807961F0), whose vtable +0x1C (fn_1_295948) plays wait_c at frame 0.
+    // touchdown (frame 0) starts on the last floor bounce (+0x74 bit 0x10 with no bounce left,
+    // +0x1A0 = floorBounces) or on any floor contact while wait_c plays (fn_1_294794 0x807A4B48,
+    // fn_1_294048 0x807A43FC; a scattered object's landing replays wait_c first, fn_1_294CDC);
+    // at rest a clip that has ended switches to wait_b (looping clips never end), whose rate
+    // follows the fuse. The port's bounce and land cues are those floor events.
+    for(unsigned p=0;p<impl_->heldBomb.size();++p){
+        const auto& e=items.hud(p);const bool tethered=e.deployed&&e.heldKind==ItemKind::Bobomb;
+        impl_->heldBombFrame[p]=tethered&&impl_->heldBomb[p]?impl_->heldBombFrame[p]+1:0;
+        impl_->heldBomb[p]=tethered;
+    }
+    if(auto* bank=impl_->animations[6].get()){
+        std::array<uint8_t,RaceItems::MaxActors> floor{}; // 1 bounce, 2 landing
+        for(const auto& s:items.sounds())if(s.actor<floor.size()&&s.kind==ItemKind::Bobomb){
+            if(s.cue==ItemSoundCue::Bounce)floor[s.actor]|=1;
+            else if(s.cue==ItemSoundCue::Land)floor[s.actor]|=2;
+        }
+        for(unsigned k=0;k<RaceItems::MaxActors;++k){
+            const auto& a=items.actors()[k];auto& b=impl_->bombs[k];
+            if(!a.active||a.kind!=ItemKind::Bobomb||a.explosion){b.live=false;continue;}
+            if(!b.live||a.age<b.age){b={};b.live=true;b.fuse=a.fuse;}
+            else b.frame+=b.rate;
+            b.age=a.age;
+            const int clip=impl_->bombClips[b.clip];
+            if(((floor[k]&1)&&!a.floorBounces)||(floor[k]&&(b.clip==Impl::WaitC||a.scattered))){b.clip=Impl::Touchdown;b.frame=0;}
+            else if(a.settled&&!bank->loop(unsigned(clip))&&b.frame>=bank->duration(unsigned(clip))){b.clip=Impl::WaitB;b.frame=0;}
+            b.rate=b.clip==Impl::WaitB?bombWalkRate(a.fuse):1.f;
+            // The flash counter (fn_1_294928 0x807A4CDC), under the same gate as the proximity
+            // fuse: below fuse 210 it runs down and restarts at max(fuse/4, 8); the nearest
+            // proximity band sets fuse 4 and counter 3.
+            if(a.scattered||(a.floorBounces<3&&(!a.backwards||a.floorBounces<2))){
+                if(a.fuse==4&&b.fuse>5)b.counter=3;
+                if(a.fuse<210&&--b.counter<1)b.counter=std::max(a.fuse>>2,8);
+            }
+            b.fuse=a.fuse;
+            b.glow=bombGlow(b.glow,b.counter,a.fuse);
+        }
+    }
+    // Player 0's Blooper (GessoManager, PAL 0x807A8F04..0x807A9A58): `start` at the user's kart
+    // when the use is admitted (ItemHolderPlayer_useBlooper, SE_ITM_GESO_START), hidden once it
+    // ends; `attack` when this screen's attack starts (the manager's timer = 100 + 3 * order,
+    // SE_ITM_GESO_ATK, 148 frames before the ink); a target that stops being one before the ink
+    // (Star, Mega, Bullet...) gets `attack_end`, blended in over 10 frames (0x808A58AC) with
+    // skl_root's position at the cut carried (fn_1_2988DC 0x807A8C90).
+    impl_->lookBack=camera&&camera->lookBack;
+    if(auto* bank=impl_->animations[12].get()){
+        auto& g=impl_->gesso;
+        if(g.state>=0){g.frame+=1;g.from+=1;}
+        for(const auto& s:items.sounds()){
+            if(s.cue==ItemSoundCue::BlooperUse&&s.player<12){g={};g.state=0;g.user=s.player;}
+            else if(s.cue==ItemSoundCue::BlooperAttack&&s.player==0){g.state=1;g.frame=0;}
+        }
+        if(g.state==1&&g.frame<float(BlooperAttackLead)&&!items.hud(0).inkDelay){
+            bank->clearPoseTransition();
+            const float* palette=bank->pose(impl_->gessoClips[1],g.frame);
+            const float* m=palette?palette+GessoRootMatrix*21:nullptr;
+            g.root=m?Vec3{m[3],m[7],m[11]}:Vec3{};
+            g.state=2;g.from=g.frame;g.frame=0;
+        }
+        const int clip=g.state>=0?impl_->gessoClips[unsigned(g.state)]:-1;
+        if(g.state>=1&&g.frame>=bank->duration(unsigned(clip)))g.state=-1;
     }
     auto& w=impl_->window;const auto& held=items.hud(0);
     // CtrlRaceItemWindow_calcSelf (0x807e4c54): the inventory item (+0x8c) with its
@@ -709,18 +889,22 @@ void RaceHud::drawWorld(Renderer& renderer,const RaceItems& items,Vec3 viewer,un
             if(clip>=0)impl_->animations[i]->apply(*impl_->models[i],clip,float(start-left),tick);
             continue;
         }
-        if(i==7||i==15){
+        if(i==6||i==7||i==15){
             // GPU-skinned banks are posed per object where drawn. The CPU fallback shares
             // one pose: the first object's.
             auto& bank=*impl_->animations[i];if(bank.gpuSkinned())continue;
-            float frame=0;
-            if(i==7){for(const auto& wings:impl_->blueWings)if(wings.live){frame=wings.frame;break;}}
+            float frame=0;int clip=i==7?impl_->blueFly:impl_->bulletWait;
+            if(i==6){
+                clip=impl_->bombClips[Impl::WaitA];
+                for(unsigned p=0;p<impl_->heldBomb.size();++p)if(impl_->heldBomb[p]){frame=impl_->heldBombFrame[p];break;}
+                for(const auto& b:impl_->bombs)if(b.live){clip=impl_->bombClips[b.clip];frame=b.frame;break;}
+            }else if(i==7){for(const auto& wings:impl_->blueWings)if(wings.live){frame=wings.frame;break;}}
             else for(unsigned p=0;p<Kinoko::System::RaceConfig::Instance()->raceScenario().playerCount;++p)
                 if(items.hud(p).bullet){frame=impl_->bulletFrame[p];break;}
-            bank.apply(*impl_->models[i],i==7?impl_->blueFly:impl_->bulletWait,frame,tick);
+            bank.apply(*impl_->models[i],clip,frame,tick);
             continue;
         }
-        int clip=impl_->animations[i]->find(i==6?"wait_a":"wait");
+        int clip=impl_->animations[i]->find("wait");
         // Reduced quality: one pose per animationStep ticks (apply reuses it).
         const unsigned step=renderQuality().animationStep,poseTick=step?tick/step*step:tick;
         impl_->animations[i]->apply(*impl_->models[i],clip<0?0:clip,float(poseTick),poseTick);
@@ -771,6 +955,19 @@ void RaceHud::drawWorld(Renderer& renderer,const RaceItems& items,Vec3 viewer,un
                 renderer.draw(*model,t);
                 renderer.setSkinPalette(nullptr,0,12);
             }
+            else if(actor.kind==ItemKind::Bobomb&&!blast){
+                // This Bob-omb's own clip and frame (stepWorld; hard cuts, fn_1_47018) and its
+                // fuse glow: CLR "bomb" b_body C2 at the glow frame.
+                const auto& own=impl_->bombs[&actor-items.actors().data()];
+                auto* bank=impl_->animations[6].get();const bool skinned=bank&&bank->gpuSkinned();
+                if(skinned){bank->clearPoseTransition();renderer.setSkinPalette(bank->pose(impl_->bombClips[own.live?own.clip:Impl::WaitC],own.live?own.frame:0.f,tick),bank->matrixCount(),21);}
+                drawAdded(renderer,*model,t,BombGlowSubmesh,own.live?clrColor(BombGlowColors,BombGlowMask,BombGlowBase,own.glow):0);
+                if(skinned)renderer.setSkinPalette(nullptr,0,12);
+            }
+            else if(actor.kind==ItemKind::Mushroom){
+                renderer.draw(*model,t,false,bindMushroom,MushroomMaterial{&renderer,model.get(),t});
+                renderer.clearEnvironmentUv();
+            }
             else renderer.draw(*model,t);
         }
         model->vertices=originalVertices;
@@ -779,7 +976,18 @@ void RaceHud::drawWorld(Renderer& renderer,const RaceItems& items,Vec3 viewer,un
         const auto& pose=Kinoko::Kart::KartObjectManager::Instance()->object(0)->pose();
         // Retail PowObj uses inverse-view up250, back-30 (=look forward30),
         // uniform1.3 scale. Its authored CHR0 performs the three block stomps.
-        renderer.drawCameraFacing(*impl_->models[13],{pose[0,3],pose[1,3],pose[2,3]},250.f,30.f,1.3f);
+        const Vec3 anchor{pose[0,3],pose[1,3],pose[2,3]};
+        const C3D_Mtx axes=renderer.cameraFacing(anchor,1.f);
+        const Vec3 up{axes.r[0].y,axes.r[1].y,axes.r[2].y},forward{-axes.r[0].z,-axes.r[1].z,-axes.r[2].z};
+        // PowScreen 1 (fn_1_2A1B38 0x807B1EEC, timer 158) plays the SRT0 pow_bloc_plane (anim 1)
+        // from frame 0 at rate 2 (0x808A5FAC); the CLR0 (anim 0) is never played.
+        const auto& srt=PowLightUV[(2*(158-items.hud(0).pow))%PowLightUV.size()];
+        std::array<SubmeshOverride,PowLightSubmesh+1> uv{};
+        auto& o=uv[PowLightSubmesh];o.flags=SubmeshOverride::Uv;o.uv[0]=o.uv[4]=1;
+        for(unsigned k=0;k<6;++k)o.uv[6+k]=srt[k];
+        renderer.setOverrides(uv.data(),unsigned(uv.size()));
+        renderer.draw(*impl_->models[13],renderer.cameraFacing(anchor+up*250.f+forward*30.f,1.3f),false,bindPowLight,PowMaterial{impl_->models[13].get()});
+        renderer.setOverrides(nullptr,0);
     }
     for(unsigned i=0;i<Kinoko::System::RaceConfig::Instance()->raceScenario().playerCount;++i){
         const auto& effect=items.hud(i);
@@ -804,7 +1012,8 @@ void RaceHud::drawWorld(Renderer& renderer,const RaceItems& items,Vec3 viewer,un
             t.r[0].x=x.x;t.r[0].y=y.x;t.r[0].z=z.x;t.r[0].w=pCloud.x;
             t.r[1].x=x.y;t.r[1].y=y.y;t.r[1].z=z.y;t.r[1].w=pCloud.y;
             t.r[2].x=x.z;t.r[2].y=y.z;t.r[2].z=z.z;t.r[2].w=pCloud.z;
-            renderer.draw(*impl_->models[14],t);
+            // The flash: CLR "kumo" kumo_body_m C1 at +0x1CC (fn_1_29EFE8 0x807AF39C).
+            drawAdded(renderer,*impl_->models[14],t,CloudFlashSubmesh,clrColor(CloudFlashColors,CloudFlashMask,CloudFlashBase,impl_->cloudFlash[i]));
         }
         unsigned orbitModel=effect.heldKind==ItemKind::TripleGreenShell?0:effect.heldKind==ItemKind::TripleRedShell?1:effect.heldKind==ItemKind::TripleBanana?2:unsigned(effect.heldKind);
         if(orbit&&impl_->models[orbitModel])for(unsigned n=0;n<3;++n)if(effect.heldMask&(1u<<n)){
@@ -822,7 +1031,50 @@ void RaceHud::drawWorld(Renderer& renderer,const RaceItems& items,Vec3 viewer,un
             t.r[0].x=x.x;t.r[0].y=y.x;t.r[0].z=z.x;t.r[0].w=position.x;
             t.r[1].x=x.y;t.r[1].y=y.y;t.r[1].z=z.y;t.r[1].w=position.y;
             t.r[2].x=x.z;t.r[2].y=y.z;t.r[2].z=z.z;t.r[2].w=position.z;
+            // A tethered Bob-omb plays wait_a from its spawn (fn_1_295810); its glow is 0.
+            auto* bomb=orbitModel==unsigned(ItemKind::Bobomb)?impl_->animations[6].get():nullptr;
+            const bool skinned=bomb&&bomb->gpuSkinned();
+            if(skinned){bomb->clearPoseTransition();renderer.setSkinPalette(bomb->pose(impl_->bombClips[Impl::WaitA],impl_->heldBombFrame[i],tick),bomb->matrixCount(),21);}
             renderer.draw(*impl_->models[orbitModel],t);
+            if(skinned)renderer.setSkinPalette(nullptr,0,12);
+        }
+    }
+    // Player 0's Blooper (GessoScreen placement fn_1_29839C 0x807A8750): Y up, Z the player's
+    // camera backward axis (view row 2; negated while looking behind) or, for a racer without a
+    // camera, its backward direction (-KartMove dir); X = Y x Z, Z = X x Y (fn_1_2CCAC4). At the
+    // kart + (0, 150, -100), scale 0.4 for `start` (0x808A589C..0x808A58A8); + (0, 180, -distance)
+    // at the weight class's scale for the attack (0x808A5860 {85,100,140}, 0x808A586C {0.39,0.41,
+    // 0.44}); attack_end adds skl_root's offset at the cut times the blend weight.
+    if(auto* bank=impl_->animations[12].get();bank&&impl_->models[12]&&impl_->gesso.state>=0){
+        const auto& g=impl_->gesso;const unsigned clip=unsigned(impl_->gessoClips[unsigned(g.state)]);
+        const auto& scenario=Kinoko::System::RaceConfig::Instance()->raceScenario();
+        const unsigned player=g.state==0?g.user:0;
+        if(g.frame<bank->duration(clip)&&player<std::min<unsigned>(scenario.playerCount,12)){
+            auto* kart=Kinoko::Kart::KartObjectManager::Instance()->object(player);
+            Vec3 back;
+            if(player==0){
+                const C3D_Mtx axes=renderer.cameraFacing({0,0,0},1.f);
+                back=Vec3{axes.r[0].z,axes.r[1].z,axes.r[2].z}*(impl_->lookBack?-1.f:1.f);
+            }else{const auto& d=kart->move()->dir();back={-d.x,-d.y,-d.z};}
+            const Vec3 y{0,1,0},x=normalized(cross(y,back),{1,0,0}),z=cross(x,y);
+            static constexpr float Distance[3]={85,100,140},Scale[3]={.39f,.41f,.44f};
+            const int weight=int(Kinoko::CharacterToWeight(scenario.players[0].character));
+            const unsigned w=unsigned(std::clamp(weight,0,2));
+            const float scale=g.state==0?.4f:Scale[w];
+            Vec3 offset=g.state==0?Vec3{0,150,-100}:Vec3{0,180,-Distance[w]};
+            const float blend=std::min(1.f,.1f*g.frame);
+            if(g.state==2)offset=offset+g.root*(scale*blend);
+            const auto& p=kart->pos();
+            const Vec3 position=Vec3{p.x,p.y,p.z}+x*offset.x+y*offset.y+z*offset.z;
+            C3D_Mtx t=axesTransform(x*scale,y*scale,z*scale,position);
+            const float* palette;
+            if(g.state==2){
+                bank->clearPoseTransition();bank->apply(*impl_->models[12],int(clip),g.frame,DriverAnimation::ClipBlend{impl_->gessoClips[1],g.from,blend},tick);
+                palette=bank->palette();
+            }else{bank->clearPoseTransition();palette=bank->pose(int(clip),g.frame,tick);}
+            renderer.setSkinPalette(palette,bank->matrixCount(),21);
+            renderer.draw(*impl_->models[12],t);
+            renderer.setSkinPalette(nullptr,0,12);
         }
     }
 }

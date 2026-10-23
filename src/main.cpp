@@ -1887,7 +1887,7 @@ int main()
     mkw::Texture sparkTexture[3];
     auto raceEffectsStorage = std::make_unique<mkw::RaceEffects>();
     auto &raceEffects = *raceEffectsStorage;
-    auto effectTextures = std::make_unique<std::array<mkw::Texture, 96>>();
+    auto effectTextures = std::make_unique<std::array<mkw::Texture, mkw::RaceEffects::MaxTextures>>();
     // Course object particle effects (mkw/course_effects.hpp): the course's archives join raceEffects.
     mkw::CourseEffects courseEffects;
     struct EffectIds
@@ -1914,6 +1914,7 @@ int main()
     auto &kartFxLod = *kartFxLodStorage;
     mkw::KartSmokeState playerSmoke;
     mkw::SsmtSparks playerSsmt;
+    mkw::SsmtEffects ssmtEffects;
     auto remoteSmokeStorage = std::make_unique<mkw::RemoteKartSmoke>();
     auto &remoteSmoke = *remoteSmokeStorage;
     mkw::KartLandingEffects landingEffects;
@@ -1924,7 +1925,7 @@ int main()
     auto kartDriftStorage = std::make_unique<mkw::KartDriftEffects>();
     auto &kartDrift = *kartDriftStorage;
     auto resetKartFx = [&]()
-    {for(unsigned i=0;i<kartFx.size();++i)kartFx[i].reset(i,i==0);kartFxLod=KartFxLod{};playerSmoke={};playerSsmt={};remoteSmoke.reset();landingEffects.reset();kartDrift.reset();
+    {for(unsigned i=0;i<kartFx.size();++i)kartFx[i].reset(i,i==0);kartFxLod=KartFxLod{};playerSmoke={};playerSsmt={};ssmtEffects.reset();remoteSmoke.reset();landingEffects.reset();kartDrift.reset();
      terrainEffects.reset(K::System::RaceConfig::Instance() ? unsigned(K::System::RaceConfig::Instance()->raceScenario().course) : ~0u); };
     resetKartFx();
     bool raceVfxReady = false;
@@ -1986,6 +1987,8 @@ int main()
             if (kQa)
                 LOGF("cpu drift fx: appended=%u emitters from common_rkrace_1 specs=%s", appended, bound ? "all" : "missing");
         }
+        if (!ssmtEffects.bind(raceEffects) && kQa)
+            LOGF("ssmt fx: specs missing");
         for (unsigned i = 0; i < raceEffects.textures.size(); ++i)
         {
             auto &texture = (*effectTextures)[i];
@@ -3914,6 +3917,29 @@ int main()
                     const mkw::Vec3 kx{pose[0, 0], pose[1, 0], pose[2, 0]}, ky{pose[0, 1], pose[1, 1], pose[2, 1]}, kz{pose[0, 2], pose[1, 2], pose[2, 2]}, kp{pose[0, 3], pose[1, 3], pose[2, 3]};
                     auto kartFrame = [&](mkw::Vec3 origin)
                     {mkw::EffectFrame f;f.origin=origin;f.x=kx;f.y=ky;f.z=kz;return f; };
+                    // The SSMT's 1T bursts and charge wheel spin (mkw/kart_drift_effects.hpp SsmtEffects).
+                    {
+                        mkw::SsmtEffects::Input s;
+                        const auto &st = kart->status();
+                        const unsigned w0 = bike ? 0 : rearLeft, w1 = bike ? 1 : rearRight;
+                        s.pose = kartFrame(kp);
+                        s.wheel[0] = vec(kart->wheelEdgePos(w0));
+                        s.wheel[1] = vec(kart->wheelEdgePos(w1));
+                        s.floor[0] = kart->hasFloorCollision(kart->tirePhysics(w0));
+                        s.floor[1] = kart->hasFloorCollision(kart->tirePhysics(w1));
+                        if (bike && s.floor[1])
+                            s.rearFloorNormal = vec(kart->collisionData(w1).floorNrm);
+                        s.bike = bike;
+                        s.insideBike = bike && kart->param()->stats().driftType == K::Kart::KartParam::Stats::DriftType::Inside_Drift_Bike;
+                        s.stickLeft = st.onBit(K::Kart::eStatus::StickLeft);
+                        s.stickRight = st.onBit(K::Kart::eStatus::StickRight);
+                        s.charging = st.onBit(K::Kart::eStatus::ChargingSSMT);
+                        s.brake = st.onBit(K::Kart::eStatus::Brake);
+                        s.waitingForBackwards = kart->move()->waitingForBackwards();
+                        s.called = !effectsTest && playerSsmt.called;
+                        s.wasCalled = playerSsmt.wasCalled;
+                        ssmtEffects.step(raceEffects, s);
+                    }
                     // Exhaust flames (rk_miniTurbo) while any boost runs, with the
                     // rk_miniTurbo1T burst on onset; pipes from kart/bikePartsDispParam.
                     const bool boosting = boost > 0 && !intro.active();

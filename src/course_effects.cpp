@@ -12,6 +12,7 @@
 #include <game/field/ObjectDirector.hh>
 #include <game/field/RailManager.hh>
 #include <game/field/obj/ObjectFlamePoleV.hh>
+#include <game/field/obj/ObjectHanachan.hh>
 #include <game/field/obj/ObjectKoopaFigure.hh>
 #include <game/field/obj/ObjectKoopaFigure64.hh>
 #include <game/field/obj/ObjectPropeller.hh>
@@ -95,6 +96,7 @@ constexpr ArchiveUse Archives[]={
     {0x070,"rk_woodbox"},    // Woodbox: rk_woodbox (0x8077E6B8)
     {0x0d3,"rk_woodbox"},    // W_Woodbox's crates
     {0x171,"rk_koopaball"},  // koopaFigure: rk_koopaBallS, rk_koopaBall (ctor 0x80771FB0)
+    {0x0e2,"rk_hana"},       // hanachan: rk_hanaSmk (hop 0x806C72B8)
 };
 constexpr uint16_t DonkyCannonGC=0x259,TreeCannon=0x261;
 
@@ -179,7 +181,7 @@ uint16_t chrFrames(const char* name){
     return be16(d+chr+0x20);
 }
 
-enum class Kind:uint8_t{Pole,Statue,Propeller,Ball,Cannon,Crate,Figure};
+enum class Kind:uint8_t{Pole,Statue,Propeller,Ball,Cannon,Crate,Figure,Wiggler};
 struct Handle{ef::Effect* effect=nullptr;uint16_t serial=0;};
 struct Tracked {
     Kind kind;
@@ -187,7 +189,7 @@ struct Tracked {
     const K::System::MapdataGeoObj* geo=nullptr;
     Clip clip;
     std::array<Handle,3> fx{};
-    uint32_t count=0;      // crate: breaks seen; Bowser's statue: mouth openings seen
+    uint32_t count=0;      // crate: breaks seen; Bowser's statue: mouth openings seen; Wiggler: landed
     bool hidden=false;     // ball: +0xf8, the clip result its calc stored a step before
     Vec3 start{};          // ball: its rail's first point (init 0x806E2C4C)
     int64_t shot=-1;       // cannon: the timer of the last shot start
@@ -212,7 +214,7 @@ struct CourseEffects::Impl {
     unsigned baseEmitters=0,baseTextures=0,textureCount=0;
     struct Ids{int flamePole=-1,flamePoleS=-1,flamePoleL=-1,koopaFire=-1,koopaFireL=-1,volcErupt=-1,volcBrk=-1,
                volcTail=-1,volcTailS=-1,volcFire=-1,volcFireS=-1,epropeller=-1,epropellerS=-1,dkCannon=-1,
-               woodbox=-1,koopaBall=-1,koopaBallS=-1;} ids;
+               woodbox=-1,koopaBall=-1,koopaBallS=-1,hanaSmk=-1;} ids;
     std::vector<Tracked> objects;
     unsigned generation=~0u;
     bool cannonStart=false,lookBack=false;
@@ -328,7 +330,7 @@ bool CourseEffects::load(RaceEffects& effects,Texture* textures,unsigned capacit
     m.ids={find("rk_flamePole"),find("rk_flamePoleS"),find("rk_flamePoleL"),find("rk_koopaFire"),find("rk_koopaFireL"),
            find("rk_volcErupt"),find("rk_volcBrk"),find("rk_volcTail"),find("rk_volcTailS"),find("rk_volcFire_L"),
            find("rk_volcFire_LS"),find("rk_epropeller"),find("rk_epropellerS"),find("rk_dkCannon"),
-           find("rk_woodbox"),find("rk_koopaBall"),find("rk_koopaBallS")};
+           find("rk_woodbox"),find("rk_koopaBall"),find("rk_koopaBallS"),find("rk_hanaSmk")};
     std::snprintf(m.summary,sizeof m.summary,"course fx %s: %u archives (%u refused), %u emitters, %u textures (%u missing)",folder.c_str(),
                   unsigned(keys.size()),refused,unsigned(effects.system().resources.size()-m.baseEmitters),m.textureCount,missing);
     return !refused&&!missing;
@@ -374,6 +376,23 @@ void CourseEffects::Impl::rebuild(){
         // Registered at load, before init or calc moved anything: the placement.
         t.clip=clipEntry(flow,id,vec(geo->pos()));
         objects.push_back(t);
+    }
+    // A Wiggler's body segments (parts 1-6; the head plays no dust, vt+0xF8 0x806CCBF0): the
+    // placement's last object is the ObjectHanachan owning them (ctor 0x806C8A5C).
+    const auto& all=director->objects();
+    for(size_t k=0;k<all.size();++k){
+        const auto* w=all[k];
+        if(!w||w->id()!=ObjectId::Hanachan||!w->mapObj())continue;
+        bool last=true;
+        for(size_t j=k+1;j<all.size()&&last;++j)last=all[j]->mapObj()!=w->mapObj();
+        if(!last)continue;
+        const auto& owner=*static_cast<const K::Field::ObjectHanachan*>(w);
+        for(size_t i=1;i<owner.partCount();++i){
+            if(!owner.part(i))continue;
+            Tracked t{};t.kind=Kind::Wiggler;t.object=owner.part(i);t.geo=w->mapObj();
+            t.clip=clipEntry(flow,0x0e2,vec(owner.part(i)->pos()));
+            objects.push_back(t);
+        }
     }
     for(const auto& l:launchers){
         const auto& launcher=*static_cast<const K::Field::ObjectVolcanoBallLauncher*>(l.second);
@@ -510,6 +529,25 @@ void CourseEffects::Impl::stepObject(ef::System& s,Tracked& t,uint32_t timer,uns
         const Vec3 p=vec(o.breakPos()),k=vec(o.scale());
         create(s,t.fx[0],ids.woodbox);
         move(s,t.fx[0],{{{k.x,0,0,p.x},{0,k.y,0,p.y},{0,0,k.z,p.z}}});
+        break;
+    }
+    case Kind::Wiggler:{
+        // Hop 0x806C72B8: at a body segment's first landing, unless culled, rk_hanaSmk at the
+        // segment's skl_root joint (0x80071DC0): the part's matrix and scale times the joint's
+        // bind pose in hanachan_body1-4 (rotation -90/0/90, 195 up; the clip's motion of the
+        // root is left out).
+        const auto& o=*static_cast<const K::Field::ObjectHanachanPart*>(t.object);
+        const bool landed=o.landed();
+        if(landed&&!t.count&&!culled){
+            const auto& m=o.transform();const float k=o.scale().x;
+            ef::Mtx34 j;
+            for(int r=0;r<3;++r){
+                j.m[r][0]=m[r,1]*k;j.m[r][1]=-m[r,2]*k;j.m[r][2]=-m[r,0]*k;
+                j.m[r][3]=m[r,3]+m[r,1]*k*195.f;
+            }
+            burst(s,ids.hanaSmk,j);
+        }
+        t.count=landed;
         break;
     }
     case Kind::Figure:{

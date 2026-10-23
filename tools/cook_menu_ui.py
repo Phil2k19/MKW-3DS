@@ -239,9 +239,16 @@ def bake_panel(name,resource,states=('free','select'),exclude=(),bounds=None,ove
 # ConfirmPage (0x52, onInit 0x805C1EB8) for a course without ghosts: a
 # MessageWindowHalf window (message_window/common_w022_message_half) with BMG
 # 0xC1D, and ConfirmOK (common_w004_menu, the 'button' panel) with BMG 2000.
-def bake_late(menu_messages,labels,text_styles,text_unique):
+# RaceMenuPage_onInit (PAL 0x80858D60) adds to the GP/VS/Battle pause pages the
+# game_image PadInfo diagram of the controller type (Classic Controller here) with
+# BMG 0x5DC-0x5E0, and to page 0x2C (GP quit confirmation) RaceMessageWindow with
+# BMG 0x44D. late_race_roles: those panels' labels, from Race.bmg.
+def bake_late(menu_messages,labels,text_styles,text_unique,late_race_roles):
  bake_panel('message_half','MenuSingle/message_window/blyt/common_w022_message_half.brlyt',states=('',),exclude=('text',),window_frames=True)
- late_roles={'message_half':[menu_messages[0xc1d]],'button':[menu_messages[0x7d0]]}
+ game_image=ROOT/'assets/race-ui/Race/game_image/blyt'
+ bake_panel('pad_info',game_image/'controller_info_cla_con.brlyt',states=('',))
+ bake_panel('race_message',game_image/'race_message_half.brlyt',states=('',),exclude=('text',),window_frames=True)
+ late_roles={'message_half':[menu_messages[0xc1d]],'button':[menu_messages[0x7d0]],**late_race_roles}
  for panel,panes in pane_records.items():
   role=re.sub(r'_(free|select|ok|selectin)$','',panel)
   if role not in late_roles:continue
@@ -457,16 +464,25 @@ def main():
  tpl('glass_focus',UI/'button/timg/tt_glass_sphere_waku_sono1.tpl')
  tpl('title',ROOT/'assets/menu-ui/Title/title/timg/tt_title_screen_mario2.tpl')
  tpl('logo',ROOT/'assets/menu-ui/Title_U/title/timg/tt_title_screen_title_rogo_r_only.tpl')
- # Original title art spans exactly 832x456 once the title logo pane has
- # settled. Keep the source's two image sizes and edge-to-edge composition.
- title=Image.new('RGBA',(832,456),(255,255,255,255))
- title.alpha_composite(decode_tpl(ROOT/'assets/menu-ui/Title/title/timg/tt_title_screen_mario2.tpl'),(0,140))
- title.alpha_composite(decode_tpl(ROOT/'assets/menu-ui/Title_U/title/timg/tt_title_screen_title_rogo_r_only.tpl'),(0,0))
- save('title_scene',title.crop((112,0,720,456)));panel_records['title_scene']=[-304,-228,304,228]
- blur=Image.new('RGBA',(832,456),(255,255,255,255))
- for archive,name,y in [('Title','tt_title_screen_mario2_bokeboke.tpl',140),('Title_U','tt_title_screen_title_rogo_bokeboke.tpl',0)]:
-  p=ROOT/'assets/menu-ui'/archive/'title/timg'/name;source(p);blur.alpha_composite(decode_tpl(p),(0,y))
- save('title_blur_scene',blur.crop((112,0,720,456)));panel_records['title_blur_scene']=[-304,-228,304,228]
+ # TitlePage_onInit (PAL 0x8063AB6C, unlock flag 0x38 set) picks title variant
+ # 0-4. TitlePage_onActivate -> fn_1_12A520 (0x8063A8D4) gives title_bottom that
+ # variant's picture pane of title_image_common.brlyt; TitleBack (0x8063B698), on
+ # the license and main-menu pages, gives title_boke's chara its _boke pane. All
+ # ten pictures are 832x316 at one pose. Original title art spans exactly 832x456
+ # once the title logo pane has settled. Keep the source's two image sizes and
+ # edge-to-edge composition.
+ timg=ROOT/'assets/menu-ui/Title/title/timg'
+ logo=decode_tpl(ROOT/'assets/menu-ui/Title_U/title/timg/tt_title_screen_title_rogo_r_only.tpl')
+ title_boke=ROOT/'assets/menu-ui/Title_U/title/blyt/title_boke.brlyt'
+ for variant,picture in [('mario1','tt_title_screen_mario'),('mario2','tt_title_screen_mario2'),('peach','tt_title_screen_peachi'),('luiji','tt_title_screen_luigi'),('koopa','tt_title_screen_koopa')]:
+  title=Image.new('RGBA',(832,456),(255,255,255,255))
+  title.alpha_composite(decode_tpl(timg/(picture+'.tpl')),(0,140));title.alpha_composite(logo,(0,0))
+  save('title_scene_'+variant,title.crop((112,0,720,456)),timg/(picture+'.tpl'));panel_records['title_scene_'+variant]=[-304,-228,304,228]
+  # title_boke as authored: the blurred logo, chara and, over them, 'line' (alpha
+  # 20), stripes every 16 units. The same 832-wide art, so no aspect squeeze.
+  blur,_,_=render_layout(title_boke,source,bounds=(-304,-228,304,228),aspect_scale=(1,1),texture_overrides={'chara':timg/(picture+'_bokeboke.tpl')})
+  back=Image.new('RGBA',blur.size,(255,255,255,255));back.alpha_composite(blur)
+  save('title_blur_scene_'+variant,back,title_boke);panel_records['title_blur_scene_'+variant]=[-304,-228,304,228]
  drivers=['mario','luigi','peach','yoshi','baby_mario','baby_peach','kinopio','noko','wario','waluigi','donky','koopa','baby_daisy','baby_luigi','catherine','daisy','didy','karon','hone_koopa','funky','teresa','roseta','kinopico','koopa_jr','mii_suit_a','mii_suit_b']
  for i,n in enumerate(drivers):tpl('driver_'+str(i),UI/'button/timg'/f'tt_{n}_64x64.tpl')
  cups=['kinoko','flower','star','oukan','koura','banana','konoha','thunder']
@@ -536,6 +552,14 @@ def main():
   'confirm':['OK','Start Race','Race This Ghost','Watch the Replay','Solo Time Trials'],
   'back':['←Back','Back'],
   'button':['Race This Ghost','Watch the Replay','Solo Time Trials','Yes','No','Continue','Restart','Quit','Race Again','Change Course','Change Character','Main Menu','Not available']}
+ # Race.bmg (US): the pause buttons' captions (PauseMenu*.brctr: 0x3EB, 0x3EC),
+ # PadInfo's labels (0x5DC-0x5E0) and page 0x2C's message (0x44D). Appended after
+ # every older label, so no existing sprite key moves.
+ race_bmg=ROOT/'assets/race-ui/Race_U/message/Race.bmg';source(race_bmg);race_messages=messages(race_bmg)
+ if message_font_indices(race_bmg,[0x3eb,0x3ec,0x44d,*range(0x5dc,0x5e1)])!={1}:raise ValueError('These race menu messages need BMG font index 1: '+str(race_bmg))
+ roles['button']+=[race_messages[0x3eb],race_messages[0x3ec]]
+ late_race_roles={'pad_info':[race_messages[i] for i in range(0x5dc,0x5e1)],'race_message':[race_messages[0x44d]]}
+ roles.update(late_race_roles)
  for required in roles.values():
   for label in required:
    if label not in labels:labels.append(label)
@@ -629,13 +653,14 @@ def main():
      tri=vv[k:k+3];pts=[((v[0]-xmin)/(xmax-xmin)*(size-1),(v[2]-zmin)/(zmax-zmin)*(size-1)) for v in tri]
      color=tuple(round(sum(v[10+c] for v in tri)/3) for c in range(4));draw.polygon(pts,fill=color)
   r=save('map_'+str(i),img,path);maps.append({'bounds':[xmin,zmin,xmax,zmax],'sourceNodes':nodes,'sprite':'map_'+str(i),'course':course_names[i]})
- bake_late(menu_messages,labels,text_styles,text_unique)
+ bake_late(menu_messages,labels,text_styles,text_unique,late_race_roles)
  # Recover selection magnification and entry duration from retail BRLAN.
  anim=UI/'button/anim/common_w004_menu_free_to_select.brlan';source(anim);dur,tracks=animation(anim)
  scales=[sample(tracks[('pause_w_fade_n','RLPA',6)],i) for i in range(dur)]
  ctr={};alphas={};qualified_controllers={}
  controller_paths=[p for archive in ['Title','MenuSingle'] for p in sorted((ROOT/'assets/menu-ui'/archive).rglob('*.brctr'))]
  controller_paths += [ROOT/'assets/race-ui/Race/button/ctrl'/(name+'.brctr') for name in ['PauseMenuVS','PauseMenuGrandPrix','PauseMenuTimeAttack','PauseMenuBT']]
+ controller_paths += [ROOT/'assets/race-ui/Race/game_image/ctrl'/(name+'.brctr') for name in ['PadInfoClassic','RaceMessageWindow']]
  for p in controller_paths:
   if p.name.startswith('._'):continue
   source(p);data=controllers(p);ctr.setdefault(p.stem,{}).update(data);alphas.setdefault(p.stem,{}).update(controller_alphas(p));qualified_controllers[p.relative_to(ROOT).as_posix()]=data

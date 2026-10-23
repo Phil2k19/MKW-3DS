@@ -37,7 +37,7 @@ public:
  // Section_GetAudioStreamIdx (USA 80601300) for the page's retail page id.
  static int layerOf(UiPage page);
 private:
- void enterSection(Section section, UiPage page);
+ void enterSection(Section section, const MenuState& visual);
  void startBgm(UiPage page);
  void applyLayer(int layer, int frames);
  Section section_ = Section::None, loaded_ = Section::None;
@@ -58,8 +58,7 @@ private:
   bool armed = false;                // +0x24
   bool rare = false;                 // +0x10: the last pick was the rare line
   int rareWait = 0;                  // +0x28: plays before another rare line may come
-  int variant = 0;                   // TitlePage +0x34c
-  int lastVariant = -1;              // section context +0x4c8 (init 0x805E31A4: -1)
+  int variant = 0;                   // TitlePage +0x34c (MenuState::titleVariant)
   bool active = false;               // TitlePage_onActivate ran for the page on screen
   bool wasTitle = false;             // +0x20 == page 0x57, kept while the voice plays
   Track track;                       // +0x2440: the voice's track volume

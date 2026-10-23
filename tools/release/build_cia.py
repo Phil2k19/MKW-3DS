@@ -266,6 +266,12 @@ def add_case_aliases():
 # part of any fingerprint, so this changes no stamp.
 JOB_MEMORY={'race bottom screen':1.25*2**30}
 
+# import_courses keeps a course whose disc archive is unchanged, even when the
+# exporter that converted it has changed. Once its step has to run again (new
+# fingerprint, or a fresh tree), convert every course. Added at run time, so it
+# changes no stamp.
+RERUN_FLAGS={'race courses and arenas':['--force']}
+
 def available_memory():
     """Free physical memory in bytes, or None when unknown."""
     try:
@@ -314,7 +320,7 @@ def stage_cook(disc,jobs,force,check=False):
         start=time.monotonic()
         log(f'step {[n for n,*_ in COOK_STEPS].index(name)+1}/{len(COOK_STEPS)}: {name}')
         for c in commands:
-            scrub_appledouble();add_case_aliases();run([str(a).replace('{py}',sys.executable).replace('{disc}',str(disc)).replace('{jobs}',str(step_jobs(name,jobs))) for a in c])
+            scrub_appledouble();add_case_aliases();run([str(a).replace('{py}',sys.executable).replace('{disc}',str(disc)).replace('{jobs}',str(step_jobs(name,jobs))) for a in c]+RERUN_FLAGS.get(name,[]))
         stamp.write_text(f'fingerprint {fingerprint}\n{time.monotonic()-start:.0f} s\n')
         for path in PRUNE_AFTER.get(name,()):shutil.rmtree(ROOT/path,ignore_errors=True)
 

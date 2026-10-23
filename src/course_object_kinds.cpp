@@ -1,11 +1,11 @@
 #include "mkw/course_object_kinds.hpp"
 #include "mkw/factory_belts.hpp"
+#include "mkw/object_anim_clock.hpp"
 #include "mkw/render_quality.hpp"
 // Kinoko's ObjectBreakable::enableCollision hides ObjectBase's const one, a
 // warning reported at ObjectBase.hh: silenced over the Kinoko headers.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Woverloaded-virtual"
-#include <game/kart/KartObjectManager.hh>
 #include <game/system/RaceConfig.hh>
 #include <game/field/ObjectDirector.hh>
 #include <game/field/obj/ObjectBase.hh>
@@ -64,6 +64,16 @@ int scroll(const Tracks& t,const char* name){return t.model&&t.model->bank?t.mod
 int color(const Tracks& t,const char* name){return t.model&&t.model->bank?t.model->bank->color(name):-1;}
 float clipFrames(const Tracks& t,int index){return t.model&&t.model->bank?float(t.model->bank->clipFrames(index)):0.f;}
 Tracks find(const ObjectAssets& assets,const char* resource,const char* model,const char* tracks=nullptr){return assets.tracks(assets.find(resource,model),tracks);}
+// The clip and frame retail's object code plays on the model: the clock src/race_audio_frame.cpp
+// keeps every step for the object's BRASD sounds (mkw/object_anim_clock.hpp). False without one.
+bool retailClock(const Tracks& t,const void* object,Anim& a){
+    ObjectAnimClock c;
+    if(!objectAnimClock(object,c))return false;
+    const int index=clip(t,c.clip);
+    if(index<0)return false;
+    a.clip=index;a.frame=c.frame;
+    return true;
+}
 // Frames since Kinoko last changed this object's observed state.
 unsigned stateAge(ObjectDraw& d,Visual& v,int state){
     if(state!=v.lastState||d.tick<v.stateTick){v.lastState=state;v.stateTick=d.tick;}
@@ -93,35 +103,27 @@ void drawGeneric(ObjectDraw& d,Visual& v){
     d.submit(t.model,m,a);
     if(v.shadow.model)d.shadow(v.shadow.model,m);
 }
+// N64 Mario Raceway's Piranha Plants: the generic picture on their model clock (init 0x80778830
+// plays their clip from 0 as the race's objects are built; retailClock).
+void drawClocked(ObjectDraw& d,Visual& v){
+    const C3D_Mtx m=v.kinetic&&v.object?liveMatrix(*v.object):v.placement;
+    const bool far=v.low.model&&length(position(m)-d.camera)>renderQuality().objectLowDistance;
+    const Tracks& t=far?v.low:v.main;
+    Anim a=loopAt(t,float(d.tick)*v.rate+v.phase);
+    retailClock(t,v.object,a);
+    d.submit(t.model,m,a);
+    if(v.shadow.model)d.shadow(v.shadow.model,m);
+}
 // Cannons: DK Summit's DonkyCannon_wii, DK Mountain's DonkyCannonGC and Maple
 // Treeway's tree_cannon are one retail class (RMCP init 806bfddc, calc
 // 806bfed0). Its one clip, the shot, rests on frame zero (setFrame stops it)
 // and plays once at rate 1 when any kart starts a cannon (CannonStart) while it
-// rests, stopping on frame zero again at its last frame; the generic presenter
-// looped it. CannonStart lasts one step, so a presentation every second step
-// also starts the shot from a kart first seen InCannon, one step late.
+// rests, stopping on frame zero again at its last frame; only the first
+// constructed cannon plays it (the ctor's index +0xe8). Its clock is the
+// object's model clock (retailClock); without one the shot rests.
 void drawDonkyCannon(ObjectDraw& d,Visual& v){
-    const auto* karts=K::Kart::KartObjectManager::Instance();
-    const auto* config=K::System::RaceConfig::Instance();
-    const unsigned players=karts&&config?config->raceScenario().playerCount:0;
-    // picks: each kart's CannonStart or InCannon when last presented.
-    if(d.tick<v.lastTick){v.picks.clear();v.lastState=-1;}
-    v.lastTick=d.tick;
-    if(v.picks.size()!=players)v.picks.assign(players,0);
-    int start=-1;
-    for(unsigned i=0;i<players;++i){
-        const auto& status=karts->object(i)->status();
-        const bool firing=status.onBit(K::Kart::eStatus::CannonStart);
-        const bool in=firing||status.onBit(K::Kart::eStatus::InCannon);
-        if(in&&!v.picks[i])start=std::max(start,int(firing||!d.tick?d.tick:d.tick-1));
-        v.picks[i]=in;
-    }
-    // lastState: 1 while the shot plays from stateTick, 0 back at rest, -1 never
-    // fired. A start on the step the shot reaches its last frame is ignored.
-    const float last=std::max(clipFrames(v.main,v.main.clip)-1.f,0.f);
-    if(v.lastState==1&&float(d.tick-v.stateTick)>=last)v.lastState=0;
-    if(v.lastState!=1&&start>=0&&(v.lastState<0||unsigned(start)>v.stateTick+unsigned(last))){v.lastState=1;v.stateTick=unsigned(start);}
-    const float frame=v.lastState==1?float(d.tick-v.stateTick):0.f;
+    ObjectAnimClock clock;
+    const float frame=objectAnimClock(v.geo,clock)?clock.frame:0.f;
     const bool far=v.low.model&&length(position(v.placement)-d.camera)>renderQuality().objectLowDistance;
     const Tracks& t=far?v.low:v.main;
     d.submit(t.model,v.placement,animAt(t,frame));
@@ -246,12 +248,14 @@ void drawHanachan(ObjectDraw& d,Visual& v){
         const auto& offset=static_cast<const K::Field::ObjectHanachanPart*>(part)->hitOffset();
         m.r[0].w+=offset.x;m.r[1].w+=offset.y;m.r[2].w+=offset.z;
         if(i==0){
-            Anim a;a.clip=v.clips[walking?0:1];a.frame=frame;
+            Anim a;
+            if(!retailClock(v.main,part,a)){a.clip=v.clips[walking?0:1];a.frame=frame;}
             d.submit(v.main.model,m,a);
             if(v.shadow.model)d.shadow(v.shadow.model,m);
         }else{
             const Tracks& body=v.extra[(i-1)%4];
-            Anim a;a.clip=body.model&&body.model->bank?body.model->bank->clip(walking?"walk":"wait"):-1;a.frame=frame;
+            Anim a;
+            if(!retailClock(body,part,a)){a.clip=body.model&&body.model->bank?body.model->bank->clip(walking?"walk":"wait"):-1;a.frame=frame;}
             d.submit(body.model,m,a);
             if(v.extra[4].model)d.shadow(v.extra[4].model,m);
         }
@@ -273,7 +277,8 @@ void drawPenguinSlide(ObjectDraw& d,Visual& v){
 }
 void drawPenguinWalk(ObjectDraw& d,Visual& v){
     const C3D_Mtx m=liveMatrix(*v.object);
-    Anim a;a.clip=v.clips[0];a.frame=float(d.tick);
+    Anim a;
+    if(!retailClock(v.main,v.object,a)){a.clip=v.clips[0];a.frame=float(d.tick);}
     d.submit(v.main.model,m,a);
     if(v.shadow.model)d.shadow(v.shadow.model,m);
 }
@@ -329,13 +334,15 @@ void drawChoropu(ObjectDraw& d,Visual& v){
     const C3D_Mtx m=liveMatrix(c);
     d.submit(v.main.model,m,a);
 }
-// Cows: wait, walk/run by speed, and the eat start/loop/end sequence.
+// Cows: the model clock (retailClock: wait, walk, the eat start/loop/end
+// sequence; retail links no run clip), else wait/walk by speed and the eat sequence.
 void drawCow(ObjectDraw& d,Visual& v){
     if(v.parts.size()<2)return;
     for(size_t i=0;i+1<v.parts.size();++i){
         const auto& cow=*static_cast<const K::Field::ObjectCow*>(v.parts[i]);
         const C3D_Mtx m=liveMatrix(cow);
         Anim a;a.frame=float(d.tick+i*17);
+        if(retailClock(v.main,&cow,a)){d.submit(v.main.model,m,a);if(v.shadow.model)d.shadow(v.shadow.model,m);continue;}
         int state;unsigned frame;
         if(i==0){const auto& l=static_cast<const K::Field::ObjectCowLeader&>(cow);state=l.stateId();frame=l.stateFrame();
             if(state==1){
@@ -347,7 +354,7 @@ void drawCow(ObjectDraw& d,Visual& v){
         }else{const auto& f=static_cast<const K::Field::ObjectCowFollower&>(cow);state=f.stateId();frame=f.stateFrame();}
         if(a.clip<0){
             const float speed=cow.xzSpeed();
-            a.clip=speed<.3f?v.clips[0]:speed>3.f?v.clips[2]:v.clips[1];
+            a.clip=speed<.3f?v.clips[0]:v.clips[1];
         }
         d.submit(v.main.model,m,a);
         if(v.shadow.model)d.shadow(v.shadow.model,m);
@@ -367,7 +374,8 @@ void drawHeyho(ObjectDraw& d,Visual& v){
 void drawPakkun(ObjectDraw& d,Visual& v){
     const auto& p=*static_cast<const K::Field::ObjectPakkunF*>(v.object);
     Anim a;
-    if(p.attacking()){a.clip=v.clips[0];a.frame=float(p.attackFrame());}
+    if(retailClock(v.main,&p,a)){}
+    else if(p.attacking()){a.clip=v.clips[0];a.frame=float(p.attackFrame());}
     else{a.clip=v.clips[1];a.frame=float(d.tick);}
     d.submit(v.main.model,liveMatrix(p),a);
 }
@@ -375,15 +383,17 @@ void drawCrab(ObjectDraw& d,Visual& v){
     const auto& c=*static_cast<const K::Field::ObjectCrab*>(v.object);
     const int state=c.state();
     if(state==2)return; // deactivated: under the sand
-    Anim a;a.frame=float(d.tick);
-    a.clip=state==1?v.clips[2]:v.clips[c.backwards()?1:0];
+    Anim a;
+    if(!retailClock(v.main,&c,a)){a.frame=float(d.tick);a.clip=state==1?v.clips[2]:v.clips[c.backwards()?1:0];}
     const C3D_Mtx m=liveMatrix(c);
     d.submit(v.main.model,m,a);
     if(v.shadow.model)d.shadow(v.shadow.model,m);
 }
 // Cataquacks: walk loop; setting 0 selects the body colour pattern frame.
 void drawPoihana(ObjectDraw& d,Visual& v){
-    Anim a;a.clip=v.clips[0];a.frame=float(d.tick);a.pat=v.clips[1];a.patFrame=float(v.geo->setting(0));
+    Anim a;
+    if(!retailClock(v.main,v.object,a)){a.clip=v.clips[0];a.frame=float(d.tick);}
+    a.pat=v.clips[1];a.patFrame=float(v.geo->setting(0));
     const C3D_Mtx m=liveMatrix(*v.object);
     d.submit(v.main.model,m,a);
     if(v.shadow.model)d.shadow(v.shadow.model,m);
@@ -515,7 +525,8 @@ void drawHeyhoBall(ObjectDraw& d,Visual& v){
 // the vomit clip 42 frames before its fireball launches, then the wait clip from frame 0.
 void drawKoopaFigure(ObjectDraw& d,Visual& v){
     const auto& statue=*static_cast<const K::Field::ObjectKoopaFigure*>(v.object);
-    Anim a;a.clip=v.clips[statue.vomiting()?1:0];a.frame=float(statue.animFrame());
+    Anim a;
+    if(!retailClock(v.main,&statue,a)){a.clip=v.clips[statue.vomiting()?1:0];a.frame=float(statue.animFrame());}
     d.submit(v.main.model,v.placement,a);
 }
 // DS Peach Gardens chomps roam as the manager's child object.
@@ -869,7 +880,7 @@ bool classifyObject(Visual& v,const ObjectAssets& assets,int course){
         v.clips[0]=clip(v.main,"start");v.clips[1]=clip(v.main,"jump");v.shadow={};
     }else if(id==ObjectId::Cow&&live){
         v.present=drawCow;
-        v.clips={clip(v.main,"wait"),clip(v.main,"walk"),clip(v.main,"run"),clip(v.main,"eat_st"),clip(v.main,"eat"),clip(v.main,"eat_ed"),-1,-1};
+        v.clips={clip(v.main,"wait"),clip(v.main,"walk"),-1,clip(v.main,"eat_st"),clip(v.main,"eat"),clip(v.main,"eat_ed"),-1,-1};
     }else if(id==ObjectId::Heyho&&live){
         v.present=drawHeyho;
         v.clips={clip(v.main,"move"),clip(v.main,"jump"),clip(v.main,"jump_ed"),pattern(v.main,"body_color"),-1,-1,-1,-1};
@@ -877,6 +888,8 @@ bool classifyObject(Visual& v,const ObjectAssets& assets,int course){
         v.present=drawPakkun;v.clips[0]=clip(v.main,"attack");v.clips[1]=clip(v.main,"wait");
     }else if(id==ObjectId::Crab&&live){
         v.present=drawCrab;v.clips={clip(v.main,"walk_l"),clip(v.main,"walk_r"),clip(v.main,"wait"),-1,-1,-1,-1,-1};
+    }else if(id==ObjectId::PuchiPakkun&&live){
+        v.present=drawClocked;
     }else if(id==ObjectId::Poihana&&live){
         v.present=drawPoihana;v.clips[0]=clip(v.main,"walk");v.clips[1]=pattern(v.main,"body_color");
     }else if((id==ObjectId::Seagull||id==ObjectId::Basabasa)&&live){

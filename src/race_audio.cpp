@@ -350,7 +350,9 @@ struct AmbienceAudio { Slot slot; AudioTrack track; };
 struct ObjActorAudio { Actor3D actor; bool placed = false; Slot limited[4]; };
 // Audio::ObjectActor (807060e8) and Audio::ObjectActorAnim (806fc04c) on a
 // course object (ObjFlow sound mode 1 / 3): four limited slots, and for the
-// animated actors RaceAnimActor's StartSound handle (+0xf8).
+// animated actors RaceAnimActor's StartSound handle (+0xf8). Mode 2 is the plain
+// RaceAnimActor (PAL 0x80700894, the cannons). Modes 2 and 3 play their BRASD events
+// through AnimSoundImpl's two event players (+0xb4, ctor 0x80086B20 with 2).
 struct ObjAudio {
  Actor3D actor; bool placed = false, live = false;
  bool muted = false;    // LinkedRaceActor +0x1d (+0xb1): toggled off
@@ -358,6 +360,7 @@ struct ObjAudio {
  u16 id = 0; u8 mode = 0, index = 0;
  Slot limited[4];
  Slot voice;
+ Slot anim[2]; u16 animEvent[2] = {0xffff, 0xffff};   // AnimEventPlayer handle, event info
 };
 // DisableConditional (807077e4 / 806fd3c0): userParam bits 0-3 by object id;
 // UpdateUserParam3 (80707c4c / 806fd55c): bits 4-7. Defaults 2 and 1.
@@ -2002,8 +2005,36 @@ struct RaceAudioLayer::Impl {
   Ambient a = ambientFor(e, sound, o.actor, &o.voice.history);
   if (e.startSound(o.voice.h, sound, nullptr, &a)) noteItem(RaceAudioLayer::QaObject);
  }
+ // A BRASD trigger event (NW4R AnimSoundImpl, DOL 0x80087340): a player still playing this
+ // event is stopped first; StartEvent (0x80087BE0) then takes the first player without a
+ // sound, else the one of lowest priority (the first on a tie), starts the sound through the
+ // actor (SetupSound: RaceAnimActor 0x80700818, ObjectActorAnim 0x80703AC8, which refuse a
+ // toggled-off actor and apply objectSetup's rules), and sets the event's volume (below 1)
+ // and pitch (other than 1).
+ void objectAnim(Engine& e, ObjAudio& o, u32 sound, f32 volume, f32 pitch, u16 event) {
+  if (o.mode != 2 && o.mode != 3) return;
+  for (int k = 0; k < 2; ++k)
+   if (o.animEvent[k] == event) { if (e.attached(o.anim[k].h)) e.stop(o.anim[k].h, 0); o.animEvent[k] = 0xffff; }
+  int pick = 0, lowest = 0x80;
+  for (int k = 0; k < 2; ++k) {
+   if (!e.attached(o.anim[k].h)) { pick = k; break; }
+   if (const int p = e.playerPriority(o.anim[k].h); p < lowest) { lowest = p; pick = k; }
+  }
+  Slot& s = o.anim[pick];
+  if (e.attached(s.h)) e.stop(s.h, 0);
+  o.animEvent[pick] = 0xffff;
+  if (o.muted && o.id != 0xf0 && o.id != 0xf2) return;
+  if (!objectSetup(o, sound)) return;
+  s.history = {}; s.flat = false;
+  Ambient a = ambientFor(e, sound, o.actor, &s.history);
+  if (!e.startSound(s.h, sound, nullptr, &a)) return;
+  noteItem(RaceAudioLayer::QaObject);
+  if (volume < 1.0f) e.setVolume(s.h, volume);
+  if (pitch != 1.0f) e.setPitch(s.h, pitch);
+  o.animEvent[pick] = event;
+ }
  void objectAmbient(Engine& e, ObjAudio& o) {
-  for (Slot* s : {&o.limited[0], &o.limited[1], &o.limited[2], &o.limited[3], &o.voice}) {
+  for (Slot* s : {&o.limited[0], &o.limited[1], &o.limited[2], &o.limited[3], &o.voice, &o.anim[0], &o.anim[1]}) {
    if (!e.attached(s->h)) { s->history = {}; continue; }
    e.setAmbient(s->h, ambientFor(e, e.soundId(s->h), o.actor, &s->history));
   }
@@ -2015,7 +2046,7 @@ struct RaceAudioLayer::Impl {
    const RaceAudioObject& in = frame.object[n];
    ObjAudio& o = objects[n];
    if (!o.live || o.id != in.id || o.mode != in.mode) {
-    for (Slot* s : {&o.limited[0], &o.limited[1], &o.limited[2], &o.limited[3], &o.voice}) if (e.attached(s->h)) e.stop(s->h, 0);
+    for (Slot* s : {&o.limited[0], &o.limited[1], &o.limited[2], &o.limited[3], &o.voice, &o.anim[0], &o.anim[1]}) if (e.attached(s->h)) e.stop(s->h, 0);
     o = ObjAudio{};
     o.live = true; o.id = in.id; o.mode = in.mode; o.index = in.index;
     o.actor.userParam = objectUserParam(in.id, in.mode, in.scale, frame.course);
@@ -2055,9 +2086,7 @@ struct RaceAudioLayer::Impl {
    case RaceAudioObjectSound::Hold: objectHold(e, o, c.sound, c.value); break;
    case RaceAudioObjectSound::StartNew: objectStartNew(e, o, c.sound, c.value); break;
    case RaceAudioObjectSound::Voice: objectVoice(e, o, c.sound); break;
-   case RaceAudioObjectSound::Animation:
-    if(auto* s=objectStart(e,o,c.sound,0.f))e.setVolume(s->h,c.value);
-    break;
+   case RaceAudioObjectSound::Animation: objectAnim(e, o, c.sound, c.value, c.pitch, c.event); break;
    default: break;
    }
   }
@@ -2172,7 +2201,10 @@ struct RaceAudioLayer::Impl {
   for (auto& g : gesso) { if (e.attached(g.slot.h)) e.stop(g.slot.h, 0); g.slot = Slot{}; }
   for (auto& a : ambiences) { if (e.attached(a.slot.h)) e.stop(a.slot.h, 0); a = AmbienceAudio{}; }
   for (auto& s : lakitu.limited) { if (e.attached(s.h)) e.stop(s.h, 0); s = Slot{}; }
-  for (auto& o : objects) for (Slot* s : {&o.limited[0], &o.limited[1], &o.limited[2], &o.limited[3], &o.voice}) { if (e.attached(s->h)) e.stop(s->h, 0); *s = Slot{}; }
+  for (auto& o : objects) {
+   for (Slot* s : {&o.limited[0], &o.limited[1], &o.limited[2], &o.limited[3], &o.voice, &o.anim[0], &o.anim[1]}) { if (e.attached(s->h)) e.stop(s->h, 0); *s = Slot{}; }
+   o.animEvent[0] = o.animEvent[1] = 0xffff;
+  }
   for (auto& o : boxActors) for (Slot* s : {&o.limited[0], &o.limited[1], &o.limited[2], &o.limited[3]}) { if (e.attached(s->h)) e.stop(s->h, 0); *s = Slot{}; }
   for (Slot* s : {&roulette, &alarm, &global, &oneShot}) { if (e.attached(s->h)) e.stop(s->h, 0); *s = Slot{}; }
  }

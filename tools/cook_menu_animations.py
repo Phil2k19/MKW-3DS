@@ -191,6 +191,9 @@ def main():
     controller_paths = [path for archive in ['Title', 'MenuSingle'] for path in sorted((UI / archive).rglob('*.brctr'))]
     controller_paths += [ROOT / 'assets/race-ui/Race/button/ctrl' / (name + '.brctr')
                          for name in ['PauseMenuVS', 'PauseMenuGrandPrix', 'PauseMenuTimeAttack', 'PauseMenuBT']]
+    # RaceMenuPage_onInit (PAL 0x80858D60): the pause diagram and page 0x2C's window.
+    controller_paths += [ROOT / 'assets/race-ui/Race/game_image/ctrl' / (name + '.brctr')
+                         for name in ['PadInfoClassic', 'RaceMessageWindow']]
     for path in controller_paths:
         if path.name.startswith('._'):
             continue

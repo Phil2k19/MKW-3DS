@@ -151,5 +151,8 @@ public:
     virtual unsigned objectContacts(unsigned /*type*/, unsigned /*owner*/, Vec3 /*position*/,
             Vec3 /*velocity*/, float /*radius*/, bool /*held*/, ItemObjectHit * /*hits*/,
             unsigned /*max*/) { return 0; }
+    /// The global item hit (PAL fn_1_31AEE0 0x8082B294): every course object, with no item,
+    /// takes retail object type `type`'s reactions (Lightning 6, POW 11).
+    virtual void globalObjectHit(unsigned /*type*/) {}
 };
 }

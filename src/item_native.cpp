@@ -100,6 +100,9 @@ public:
         for(size_t i=0;i<n&&out<max;++i)hits[out++]={nativeVec(director->hitDepth(i)),int16_t(director->reaction(i))};
         return out;
     }
+    void globalObjectHit(unsigned type)override{
+        if(auto* director=K::Field::ObjectDirector::Instance())director->broadcastItemCollision(K::s16(type));
+    }
 };
 // Our own interpolator on the rail Kinoko's RailManager built for a KMP
 // route (initialised twice like retail objects, so a smooth rail moves).

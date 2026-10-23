@@ -1,6 +1,8 @@
 // Copies the race state the audio thread needs out of Kinoko into a
 // RaceAudioFrame, once per simulation tick on the main thread. Only the
 // audio-only sound cues are taken (cleared); the simulation state is read.
+#include <mkw/object_anim_clock.hpp>
+#include <mkw/object_sound_assets.hpp>
 #include <mkw/race_audio.hpp>
 #include <mkw/race_item_internal.hpp>
 #include <mkw/race_items.hpp>
@@ -17,7 +19,14 @@
 #include <game/field/ObjectDrivableDirector.hh>
 #include <game/field/obj/ObjectBase.hh>
 #include <game/field/obj/ObjectBird.hh>
+#include <game/field/obj/ObjectCow.hh>
+#include <game/field/obj/ObjectCrab.hh>
+#include <game/field/obj/ObjectHanachan.hh>
 #include <game/field/obj/ObjectId.hh>
+#include <game/field/obj/ObjectKoopaFigure.hh>
+#include <game/field/obj/ObjectKuribo.hh>
+#include <game/field/obj/ObjectPakkunF.hh>
+#include <game/field/obj/ObjectPoihana.hh>
 #include <game/field/obj/ObjectStarRing.hh>
 #include <game/system/CourseMap.hh>
 #include <game/system/RaceConfig.hh>
@@ -25,6 +34,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 
 namespace mkw {
 namespace K = Kinoko;
@@ -53,11 +63,69 @@ static_assert(cue::JumpAction > std::uint32_t(Cue::SoundTrigger) && cue::ZipperT
 static_assert(std::uint32_t(K::Kart::eStatus::Vanishing) == 82);
 
 namespace {
+// Course objects' BRASD animation sounds. Retail loads brasd/<resource>/<clip>.brasd beside each
+// CHR0 clip (fn_1_455C8, PAL 0x8055597C). Every frame the model's anim manager (0x805578D8)
+// hands the frame of its slot-0 clip to the object's RaceAnimActor (ObjFlow sound mode 2) or
+// ObjectActorAnim (mode 3): UpdateFrame (0x80700754) skips frames at or past the BRASD's frame
+// count, else NW4R's AnimSoundImpl (DOL 0x80086D70) fires the events of every integer frame
+// the clip passed. A clip change hands over its BRASD (actor vt+0x5c, 0x80700728): another file
+// resets the cursor, the same one keeps it. Here each sounding object has such a cursor, fed
+// every step with the clip and frame retail's object code gives its model (stepAnims, from
+// Kinoko's state; a clip started in a step shows its frame advanced once by the model update),
+// and the events reach the object's actor (race_audio.cpp objectAnim).
+int soundClip(const char* resource, const char* clip) {
+ for (std::size_t i = 0; i < std::size(ObjectSoundClips); ++i)
+  if (!std::strcmp(ObjectSoundClips[i].resource, resource) && !std::strcmp(ObjectSoundClips[i].name, clip)) return int(i);
+ return -1;
+}
+struct AnimCursor {
+ int clip = -1;       // the BRASD in use (ObjectSoundClips), -1: none (SetFile(0))
+ float frame = 0.0f;  // AnimSoundImpl +0xc
+ bool fresh = false;  // +0x19 / +0x1a, set by a new file
+ // RaceAnimActor::SetFile (0x80700728) and UpdateFrame (0x80700754 -> 0x80086D70, forward
+ // 0x80086EA0): the first update after a reset includes frame 0; then every integer frame in
+ // (floor(previous), floor(frame)], wrapping at the BRASD's frame count. Each cooked event is
+ // a trigger played on every loop (trigger 0x80087340).
+ template<class Emit> void update(int c, float f, Emit&& emit) {
+  if (c != clip) { clip = c; frame = 0.0f; fresh = c >= 0; }
+  if (clip < 0 || !(f >= 0.0f)) return;
+  const ObjectSoundClip& k = ObjectSoundClips[clip];
+  if (!(f < float(k.frames))) return;
+  int g = int(std::floor(frame));
+  const int target = int(std::floor(f));
+  if (fresh && frame == float(g)) --g;
+  fresh = false;
+  frame = f;
+  while (g != target) {
+   if (++g == int(k.frames)) g = 0;
+   for (unsigned i = 0; i < k.count; ++i)
+    if (int(ObjectSoundEvents[k.first + i].frame) == g) emit(std::uint16_t(k.first + i));
+  }
+ }
+};
+// A course object's model clock (stepAnims): the CHR0 clip it plays and that clip's frame (a
+// looping clip's frame runs on past its length; the cursor and the presenter wrap it).
+struct ObjectAnim {
+ enum Kind : std::uint8_t { None, Cannon, KoopaFigure, Crab, PuchiPakkun, PakkunF, WigglerHead, WigglerBody, Kuribo, Poihana,
+                            PenguinM, CowLeader, CowFollower };
+ Kind kind = None;
+ const char* resource = "";                            // the model's BRRES, its BRASD folder
+ const char* clip = nullptr;                           // the clip the model plays
+ float frame = 0.0f, rate = 0.0f, speed = 0.0f;
+ const K::Field::ObjectHanachan* wiggler = nullptr;   // a Wiggler part's owner
+ std::uint8_t part = 0;                                // the part (0 head, 1-6 the body segments)
+ bool flag = false;
+ const char* soundOf = nullptr; int sound = -1;        // `clip`'s BRASD (ObjectSoundClips)
+ AnimCursor cursor;
+ // fn_1_472D0 (0x80557684): plays `name` from frame 0 unless it already plays.
+ void play(const char* name) { if (!clip || std::strcmp(clip, name)) { clip = name; frame = 0.0f; } }
+};
 // Kinoko objects whose ObjFlow entry gives them a sound actor; a slot is the
 // object's index here for the rest of the race. Course objects Kinoko does not
 // build but retail gives a sound actor are kept by their GOBJ entry: the
 // ObjectActor idle loops whose objects have no collision (flags, the Peach
-// Beach fountain) and the KMP sound_* emitters (positioned on their route).
+// Beach fountain), the KMP sound_* emitters (positioned on their route) and the
+// first cannon (a RaceAnimActor, sound mode 2).
 struct ObjectRegistry {
  std::size_t scanned = 0, scannedDrivable = 0;
  bool courseScanned = false;
@@ -67,6 +135,13 @@ struct ObjectRegistry {
  std::array<const K::System::MapdataGeoObj*, 128> geo{};
  std::array<std::uint16_t, 128> id{};
  std::array<std::uint8_t, 128> mode{}, index{};
+ std::array<ObjectAnim, 128> anim{};
+ std::uint8_t animSetup = 0;     // slots whose clock is set up
+ std::uint32_t animTick = 0;     // steps since the race's objects were built
+ bool cannonStart = false;       // a racer's CannonStart after the last step (the next calc's)
+ // In place: the arrays are too large for a temporary on the main thread's stack; slots past
+ // `count` are rebuilt as they are added.
+ void reset() { scanned = scannedDrivable = 0; courseScanned = false; pocha = count = animSetup = 0; animTick = 0; cannonStart = false; }
  int find(const K::Field::ObjectBase* o) const { for (int i = 0; i < count; ++i) if (object[i] == o) return i; return -1; }
  int add(const K::Field::ObjectBase* o, const K::System::MapdataGeoObj* g, std::uint16_t objectId, int m) {
   if (count >= object.size()) return -1;
@@ -170,6 +245,224 @@ std::uint8_t seaState(const K::Kart::KartObject& kart) {
  if (body >= sea && rear < sea) return deep ? 2 : 1;
  return 3;
 }
+// The clock of registry slot `s`, once, when the slot is first seen.
+void setupAnim(int s) {
+ ObjectAnim& a = registry.anim[s];
+ a = ObjectAnim{};
+ const K::Field::ObjectBase* o = registry.object[s];
+ if (!o) {
+  if (registry.mode[s] == 2) {   // the first cannon (fillRaceAudioObjects' course scan)
+   a.kind = ObjectAnim::Cannon;
+   a.resource = a.clip = registry.id[s] == 0x25f ? "DonkyCannon_wii" : registry.id[s] == 0x259 ? "DonkyCannonGC" : "tree_cannon";
+  }
+  return;
+ }
+ using Id = K::Field::ObjectId;
+ switch (o->id()) {
+ case Id::KoopaFigure: a.kind = ObjectAnim::KoopaFigure; a.resource = "koopaFigure"; return;
+ case Id::Crab: a.kind = ObjectAnim::Crab; a.resource = "crab"; return;
+ case Id::PuchiPakkun: a.kind = ObjectAnim::PuchiPakkun; a.resource = "puchi_pakkun"; return;
+ case Id::PakkunF: a.kind = ObjectAnim::PakkunF; a.resource = "pakkun_f"; return;
+ case Id::Kuribo: a.kind = ObjectAnim::Kuribo; a.resource = "kuribo"; return;
+ case Id::Poihana: a.kind = ObjectAnim::Poihana; a.resource = "poihana"; return;
+ case Id::PenguinM: a.kind = ObjectAnim::PenguinM; a.resource = "penguin_m"; return;
+ default: break;
+ }
+ const auto& objects = K::Field::ObjectDirector::Instance()->objects();
+ if (o->id() == Id::Cow && o->mapObj()) {
+  // The herd (ctor 0x806BEB54) builds its leader, then its followers, then itself: by
+  // placement, the first object is the leader and the last the herd.
+  std::size_t first = objects.size(), last = 0, at = 0;
+  for (std::size_t k = 0; k < objects.size(); ++k)
+   if (objects[k]->mapObj() == o->mapObj()) { first = std::min(first, k); last = k; if (objects[k] == o) at = k; }
+  if (at != last) { a.kind = at == first ? ObjectAnim::CowLeader : ObjectAnim::CowFollower; a.resource = "cow"; }
+  return;
+ }
+ if (o->id() != Id::Hanachan && std::uint16_t(o->id()) != 0xf2) return;
+ // A Wiggler's parts: the head (BossHanachanHead) and the six body segments built with the
+ // placement, whose last object is the ObjectHanachan owning them (ctor 0x806C8A5C).
+ for (std::size_t k = 0; k < objects.size(); ++k) {
+  const auto* w = objects[k];
+  if (w->id() != Id::Hanachan || !w->mapObj()) continue;
+  bool last = true;
+  for (std::size_t j = k + 1; j < objects.size() && last; ++j) last = objects[j]->mapObj() != w->mapObj();
+  if (!last) continue;
+  const auto* owner = static_cast<const K::Field::ObjectHanachan*>(w);
+  for (std::size_t i = 0; i < owner->partCount(); ++i)
+   if (owner->part(i) == o) {
+    a.kind = i ? ObjectAnim::WigglerBody : ObjectAnim::WigglerHead;
+    a.resource = "hanachan"; a.wiggler = owner; a.part = std::uint8_t(i);
+    return;
+   }
+ }
+}
+// An event reaches the object's actor (race_audio.cpp objectAnim).
+void emitAnim(RaceAudioFrame& f, int s, const ObjectAnim& a, const K::Field::ObjectBase* o, std::uint16_t e) {
+ const ObjectSoundEvent& ev = ObjectSoundEvents[e];
+ std::uint16_t sound = ev.sound;
+ // ObjectActorAnim::SetupSound (0x80703CF0): on GCN Peach Beach a Cataquack's steps
+ // SE_CC_POIHANA_FN1/FN2 become FNS1/FNS2 (+2) at least 270 above the tide, else FNW1/FNW2
+ // (+4) (0x8082B3D4, 0x808A16D0).
+ if (a.kind == ObjectAnim::Poihana && (sound == 0x259 || sound == 0x25a)) {
+  const auto* dir = K::Field::ObjectDirector::Instance();
+  const auto* config = K::System::RaceConfig::Instance();
+  if (dir && dir->psea() && config && config->raceScenario().course == K::Course::GCN_Peach_Beach)
+   sound = std::uint16_t(sound + (dir->distAboveRisingWater(o->pos().y) < 270.0f ? 4 : 2));
+ }
+ if (f.objectSounds < f.objectSound.size())
+  f.objectSound[f.objectSounds++] = {std::uint16_t(s), sound, std::uint8_t(RaceAudioObjectSound::Animation), ev.volume, ev.pitch, e};
+}
+// One step of every clocked object's model: the clip and frame retail's object code gives it
+// (its calc, then the model update advancing the frame by the clip's rate), into its BRASD cursor.
+void stepAnims(RaceAudioFrame& f) {
+ for (; registry.animSetup < registry.count; ++registry.animSetup) setupAnim(registry.animSetup);
+ const std::uint32_t tick = ++registry.animTick;
+ const auto* race = K::System::RaceManager::Instance();
+ const std::uint32_t timer = race ? race->timer() : 0;
+ for (int s = 0; s < registry.count; ++s) {
+  ObjectAnim& a = registry.anim[s];
+  const K::Field::ObjectBase* o = registry.object[s];
+  switch (a.kind) {
+  case ObjectAnim::None: continue;
+  case ObjectAnim::Cannon:
+   // Calc 0x806BFED0: the shot clip rests on frame 0 at rate 0 (init 0x806BFDDC); a racer's
+   // CannonStart (the karts' calc follows the objects': the last step's) plays it from 0 at
+   // rate 1 while it rests; at frame count - 1 (+0xE4) it rests on 0 again.
+   if (a.frame == 0.0f && registry.cannonStart) a.rate = 1.0f;
+   if (a.sound >= 0 && a.frame >= float(ObjectSoundClips[a.sound].chrFrames) - 1.0f) { a.frame = 0.0f; a.rate = 0.0f; }
+   a.frame += a.rate;
+   break;
+  case ObjectAnim::KoopaFigure: {
+   // Kinoko's statue (calc 0x8077213C): vomit from 0, then wait from 0 (looping).
+   const auto& k = *static_cast<const K::Field::ObjectKoopaFigure*>(o);
+   a.clip = k.vomiting() ? "vomit" : "wait"; a.frame = float(k.animFrame() + 1);
+   break;
+  }
+  case ObjectAnim::Crab: {
+   // Calc 0x80883B98: walking starts walk_l / walk_r (the rail direction against setting 1)
+   // from 0 at setting 0 / 9 (0x808DCBE0 / 0x808DCBDC); standing still plays wait from 0 at the
+   // rate 0x809C49AC (never written: 0). Kinoko's crabs have no hit or sand states.
+   const auto& k = *static_cast<const K::Field::ObjectCrab*>(o);
+   if (k.state() == 1) { a.play("wait"); a.rate = 0.0f; }
+   else if (!a.clip || !std::strcmp(a.clip, "wait")) {
+    const bool forward = !k.railInterpolator() || k.railInterpolator()->isMovementDirectionForward();
+    a.play(forward == k.backwards() ? "walk_r" : "walk_l");
+    a.rate = float(std::int16_t(k.mapObj()->setting(0))) / 9.0f;
+   }
+   a.frame += a.rate;
+   break;
+  }
+  case ObjectAnim::PuchiPakkun:
+   // Init 0x80778830: puchi_pakkun from 0 at rate 1, never changed.
+   a.clip = "puchi_pakkun"; a.frame = float(tick);
+   break;
+  case ObjectAnim::PakkunF: {
+   // Init 0x807743E4 plays wait; enterAttack 0x80774CB0 plays attack from 0; calc 0x80774754
+   // plays wait from 0 once attack (played once) reached its frame count.
+   const auto& k = *static_cast<const K::Field::ObjectPakkunF*>(o);
+   const bool attack = a.clip && !std::strcmp(a.clip, "attack");
+   if (!a.clip || (attack && a.sound >= 0 && a.frame >= float(ObjectSoundClips[a.sound].chrFrames))) a.play("wait");
+   if (k.attacking() && !a.flag) a.play("attack");
+   a.flag = k.attacking();
+   a.frame += 1.0f;
+   if (!std::strcmp(a.clip, "attack") && a.sound >= 0) a.frame = std::min(a.frame, float(ObjectSoundClips[a.sound].chrFrames));
+   break;
+  }
+  case ObjectAnim::WigglerHead: {
+   // Walking: head_walk (initWalk 0x806C9BC0). Waiting (initWait 0x806C9EC8, calcWait
+   // 0x806C9F98): head_wait from 0, head_wait2 from the wait's frame 60 (vt+0x118, 0x806CB588)
+   // and head_wait again after its 180 frames (+0x104).
+   const unsigned st = a.wiggler->stateId(), sf = a.wiggler->stateFrame();
+   if (st == 0) { a.clip = "head_walk"; a.frame = float(sf + 1); }
+   else if (sf < 60) { a.clip = "head_wait"; a.frame = float(sf + 1); }
+   else if (sf < 240) { a.clip = "head_wait2"; a.frame = float(sf - 59); }
+   else { a.clip = "head_wait"; a.frame = float(sf - 239); }
+   break;
+  }
+  case ObjectAnim::WigglerBody: {
+   // Body segment i walks at (80 + 6i) / 80 (initWalk 0x806C9BC0, 0x8089FAA8), from 0 when it
+   // was waiting; in a wait it plays wait from 0 at rate 1 at the wait's frame 4i (calcWait
+   // 0x806C9F98). Init (0x806CA72C) starts walk from 0.
+   const unsigned i = a.part - 1u, st = a.wiggler->stateId(), sf = a.wiggler->stateFrame();
+   if (!a.clip || (st == 0 && sf == 0)) { a.play("walk"); a.rate = float(80 + 6 * i) / 80.0f; }
+   if (st == 1 && sf == 4 * i) { a.play("wait"); a.rate = 1.0f; }
+   a.frame += a.rate;
+   break;
+  }
+  case ObjectAnim::Kuribo: {
+   // Kinoko's walk timer is the walk clip's frame; the clip holds while the Goomba is hit,
+   // blinking or popping up (0x806DB5B0), and goes on from there.
+   const auto& k = *static_cast<const K::Field::ObjectKuribo*>(o);
+   a.clip = "walk_l";
+   if (!k.walking()) { a.flag = true; continue; }
+   if (a.flag) { a.flag = false; a.cursor.frame = k.animTimer(); }
+   a.frame = k.animTimer();
+   break;
+  }
+  case ObjectAnim::Poihana: {
+   // Kinoko's Cataquack clock (walk loops; throw and overturn play once).
+   const auto& k = *static_cast<const K::Field::ObjectPoihana*>(o);
+   a.clip = k.animationName(); a.frame = k.animationFrame();
+   break;
+  }
+  case ObjectAnim::PenguinM:
+   // ObjectPenguin init 0x807756B0: walk from 0 at rate 1; the cave penguins never change it.
+   a.clip = "walk"; a.frame = float(tick);
+   break;
+  case ObjectAnim::CowLeader: {
+   // Calc 0x806BD388: eat until 60 frames before the herd's start (setting 2), then eat_ed;
+   // after it wait (enterWait / calcWait 0x806BD6B0 / 0x806BD738), eat_st, eat from its frame
+   // 40 and eat_ed past its eat frames (enterEat / calcEat 0x806BD7D8 / 0x806BD84C), walk at 0.3
+   // (0x8089F3B0) x the rail speed (enterRoam / calcRoam 0x806BDA1C / 0x806BDA70); else rate 1.
+   // Retail links no run clip (anim list 0x8089F360).
+   const auto& k = *static_cast<const K::Field::ObjectCowLeader*>(o);
+   const std::uint32_t start = k.mapObj()->setting(2);
+   a.rate = 1.0f;
+   if (timer < start - 60u) a.play("eat");
+   else if (timer < start) a.play("eat_ed");
+   else if (k.stateId() == 0) a.play("wait");
+   else if (k.stateId() == 1) {
+    const std::uint32_t sf = k.stateFrame();
+    a.play(sf < 40 ? "eat_st" : sf <= std::uint16_t(k.eatFrames() + 40) ? "eat" : "eat_ed");
+   } else { a.play("walk"); a.rate = 0.3f * k.railSpeed(); }
+   a.frame += a.rate;
+   break;
+  }
+  case ObjectAnim::CowFollower: {
+   // Init 0x806BE060 and calc 0x806BE1A8: wait until the herd's start; then wait (state 0,
+   // 0x806BE4E8 / 0x806BE580) or walk (free roam 0x806BE62C / 0x806BE794, following
+   // 0x806BE930 / 0x806BE9CC) at 0.3 x its speed (+0xE4, as the calc found it: the last step's).
+   const auto& k = *static_cast<const K::Field::ObjectCowFollower*>(o);
+   if (timer < k.mapObj()->setting(2) || k.stateId() == 0) { a.play("wait"); a.rate = 1.0f; }
+   else { a.play("walk"); a.rate = 0.3f * a.speed; }
+   a.speed = k.xzSpeed();
+   a.frame += a.rate;
+   break;
+  }
+  }
+  if (a.clip != a.soundOf) { a.soundOf = a.clip; a.sound = a.clip ? soundClip(a.resource, a.clip) : -1; }
+  const float frame = a.sound >= 0 && ObjectSoundClips[a.sound].chrLoop ? std::fmod(a.frame, float(ObjectSoundClips[a.sound].chrFrames)) : a.frame;
+  a.cursor.update(a.sound, frame, [&](std::uint16_t e) { emitAnim(f, s, a, o, e); });
+ }
+// What the next step's cannon calc reads of the karts.
+ registry.cannonStart = false;
+ if (const auto* karts = K::Kart::KartObjectManager::Instance()) {
+  const unsigned n = std::min<unsigned>(K::System::RaceConfig::Instance()->raceScenario().playerCount, 12);
+  for (unsigned i = 0; i < n; ++i)
+   if (const auto* kart = karts->object(i)) registry.cannonStart |= kart->status().onBit(K::Kart::eStatus::CannonStart);
+ }
+}
+}
+
+bool objectAnimClock(const void* object, ObjectAnimClock& out) {
+ for (int i = 0; i < registry.count; ++i) {
+  const ObjectAnim& a = registry.anim[i];
+  if (i >= registry.animSetup || a.kind == ObjectAnim::None || !a.clip) continue;
+  if (registry.object[i] != object && (registry.object[i] || registry.geo[i] != object)) continue;
+  out.clip = a.clip; out.frame = a.frame;
+  return true;
+ }
+ return false;
 }
 
 void fillRaceAudioFrame(RaceAudioFrame& f, snd::Vec3f eye, snd::Vec3f target, snd::Vec3f up, bool preview) {
@@ -296,7 +589,7 @@ void fillRaceAudioItems(RaceAudioFrame& f, const RaceItems& items) {
 }
 
 void resetRaceAudioObjects() {
- registry = ObjectRegistry{};
+ registry.reset();
  K::Field::ObjectBase::SoundCue drop[96];
  while (K::Field::ObjectBase::TakeSoundCues(drop, 96) == 96) {}
 }
@@ -308,7 +601,7 @@ void fillRaceAudioObjects(RaceAudioFrame& f) {
  const auto& objects = dir->objects();
  const auto* drivables = K::Field::ObjectDrivableDirector::Instance();
  const std::size_t drivableCount = drivables ? drivables->objects().size() : 0;
- if (objects.size() < registry.scanned || drivableCount < registry.scannedDrivable) registry = ObjectRegistry{};
+ if (objects.size() < registry.scanned || drivableCount < registry.scannedDrivable) registry.reset();
  auto scan = [&](const K::Field::ObjectBase* o) {
   const int m = dir->flowTable().soundMode(o->id());
   if ((m == 1 || m == 3) && registry.find(o) < 0) registry.add(o, nullptr, std::uint16_t(o->id()), m);
@@ -321,6 +614,7 @@ void fillRaceAudioObjects(RaceAudioFrame& f) {
  const auto* map = K::System::CourseMap::Instance();
  if (!registry.courseScanned && map) {
   registry.courseScanned = true;
+  bool cannon = false;
   for (std::uint16_t i = 0; i < map->getGeoObjCount(); ++i) {
    const auto* g = map->getGeoObj(i);
    if (!g || !(g->presenceFlag() & 1)) continue;
@@ -331,6 +625,9 @@ void fillRaceAudioObjects(RaceAudioFrame& f) {
    const bool emitter = emitterObject(id) && g->pathId() >= 0 && map->getPointInfo(std::uint16_t(g->pathId())) &&
                         map->getPointInfo(std::uint16_t(g->pathId()))->pointCount() > 0;
    if (idle || emitter) registry.add(nullptr, g, id, 1);
+   // DonkyCannon_wii, DonkyCannonGC, tree_cannon: a RaceAnimActor (ObjFlow sound mode 2) whose
+   // shot clip only the first constructed cannon plays (ctor 0x806BFB14 numbers them, +0xe8).
+   else if ((id == 0x25f || id == 0x259 || id == 0x261) && !cannon) { cannon = true; registry.add(nullptr, g, id, 2); }
   }
  }
  f.pocha = registry.pocha;
@@ -343,6 +640,8 @@ void fillRaceAudioObjects(RaceAudioFrame& f) {
   if (slot < 0 || f.objectSounds >= f.objectSound.size()) continue;
   f.objectSound[f.objectSounds++] = {std::uint16_t(slot), c.sound, std::uint8_t(c.call), c.value};
  }
+ // The models' BRASD events follow the objects' calc (the global model update, 0x80563640).
+ stepAnims(f);
  // Rainbow Road's star rings: this tick's SE_CN_RBW_STAR_RING calls.
  for (const auto* o : objects) {
   if (o->id() != K::Field::ObjectId::StarRing) continue;

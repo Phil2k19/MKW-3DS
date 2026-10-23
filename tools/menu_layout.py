@@ -220,16 +220,31 @@ def render_layout(path, source, animations=(), frame=0, bounds=None, exclude=(),
                 # each quad running on along an edge (texcoords past 1, clamped).
                 # Opt-in: earlier cooks drew the content quad alone.
                 il,ir,it,ib=struct.unpack_from('>4f',d,s+68)
-                if d[s+84]!=1:raise ValueError(f'Unsupported window frame count {d[s+84]}: {path} / {name}')
-                fmi=struct.unpack_from('>H',d,block+struct.unpack_from('>I',d,block+struct.unpack_from('>I',d,s+92)[0])[0])[0]
+                if d[s+84] not in (1,4):raise ValueError(f'Unsupported window frame count {d[s+84]}: {path} / {name}')
+                table=block+struct.unpack_from('>I',d,s+92)[0]
+                frames=[struct.unpack_from('>H',d,block+struct.unpack_from('>I',d,table+4*k)[0])[0] for k in range(d[s+84])]
+                fmi=frames[0]
                 ftex=texture(path.parent.parent/'timg'/textures[materials[fmi]['samplers'][0][0]])
                 th,tw=ftex.shape[:2];W,H=v[8],v[9]
                 def quad(qx,qy,qw,qh,coords,qmi,qcolors):
                     c=matrix@np.array([[qx,qx+qw,qx,qx+qw],[qy,qy,qy-qh,qy-qh],[1,1,1,1]])
                     qrect=[float(c[0].min()),float(-c[1].max()),float(c[0].max()),float(-c[1].min())]
                     panes.append((name,matrix,alpha,qx,qy,qw,qh,qcolors,qmi,coords,z,qrect,draw))
-                quad(left+tw-il,top-th+it,W-2*tw+il+ir,H-2*th+it+ib,uv,mi,colors/255)
                 white=np.ones((4,4),dtype=np.float32)
+                if len(frames)==4:
+                    # DrawFrame4 (PAL 0x8007DB00): frames LT, RT, LB, RB, each its own
+                    # texture, unflipped and anchored at its own outer corner (texcoords
+                    # past the far edge clamp). Same quads as DrawFrame, in the order
+                    # LT, RT, RB, LB; left/top from LT's texture, right/bottom from RB's.
+                    (lth,ltw),(rth,rtw),(lbh,lbw),(rbh,rbw)=[texture(path.parent.parent/'timg'/textures[materials[m]['samplers'][0][0]]).shape[:2] for m in frames]
+                    l,t,r,b=ltw,lth,rbw,rbh
+                    quad(left+l-il,top-t+it,W-l-r+il+ir,H-t-b+it+ib,uv,mi,colors/255)
+                    pw,ph=W-r,t;quad(left,top,pw,ph,(0,0,pw/ltw,0,0,ph/lth,pw/ltw,ph/lth),frames[0],white)
+                    pw,ph=r,H-b;quad(left+W-r,top,pw,ph,(1-pw/rtw,0,1,0,1-pw/rtw,ph/rth,1,ph/rth),frames[1],white)
+                    pw,ph=W-l,b;quad(left+l,top-H+b,pw,ph,(1-pw/rbw,1-ph/rbh,1,1-ph/rbh,1-pw/rbw,1,1,1),frames[3],white)
+                    pw,ph=l,H-t;quad(left,top-t,pw,ph,(0,1-ph/lbh,pw/lbw,1-ph/lbh,0,1,pw/lbw,1),frames[2],white)
+                    continue
+                quad(left+tw-il,top-th+it,W-2*tw+il+ir,H-2*th+it+ib,uv,mi,colors/255)
                 pw,ph=W-tw,th;quad(left,top,pw,ph,(0,0,pw/tw,0,0,ph/th,pw/tw,ph/th),fmi,white)
                 pw,ph=tw,H-th;quad(left+W-tw,top,pw,ph,(pw/tw,0,0,0,pw/tw,ph/th,0,ph/th),fmi,white)
                 pw,ph=W-tw,th;quad(left+tw,top-H+th,pw,ph,(pw/tw,ph/th,0,ph/th,pw/tw,0,0,0),fmi,white)
@@ -358,12 +373,14 @@ def messages(path):
     return result
 
 
-def message_font_indices(path):
-    """Read the INF1 font attribute consumed by BMGHolder::GetFontIndex."""
-    d=path.read_bytes();offset=32
+def message_font_indices(path,identifiers=None):
+    """Read the INF1 font attribute consumed by BMGHolder::GetFontIndex, of every
+    message or only of the given message IDs (MID1, as messages())."""
+    d=path.read_bytes();offset=32;blocks={}
     for _ in range(struct.unpack_from('>I',d,12)[0]):
-        if d[offset:offset+4]==b'INF1':
-            count,stride=struct.unpack_from('>HH',d,offset+8)
-            return {d[offset+16+index*stride+4] for index in range(count)}
+        blocks[d[offset:offset+4]]=offset
         offset+=struct.unpack_from('>I',d,offset+4)[0]
-    raise ValueError('Missing INF1 font attributes: '+str(path))
+    if b'INF1' not in blocks:raise ValueError('Missing INF1 font attributes: '+str(path))
+    info=blocks[b'INF1'];count,stride=struct.unpack_from('>HH',d,info+8)
+    ids=[struct.unpack_from('>I',d,blocks[b'MID1']+16+index*4)[0] if b'MID1' in blocks else index for index in range(count)]
+    return {d[info+16+index*stride+4] for index in range(count) if identifiers is None or ids[index] in identifiers}

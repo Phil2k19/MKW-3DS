@@ -1714,7 +1714,7 @@ index 1d1d81e..f0b06ac 100644
  
  /// @addr{0x806BEB54}
 diff --git a/source/game/field/obj/ObjectCow.hh b/source/game/field/obj/ObjectCow.hh
-index 1d29e4b..6487a48 100644
+index 1d29e4b..bebfe4a 100644
 --- a/source/game/field/obj/ObjectCow.hh
 +++ b/source/game/field/obj/ObjectCow.hh
 @@ -16,6 +16,10 @@ public:
@@ -1728,13 +1728,19 @@ index 1d29e4b..6487a48 100644
  protected:
      virtual void calcFloor();
  
-@@ -61,6 +65,11 @@ public:
+@@ -61,6 +65,17 @@ public:
          return 1;
      }
  
 +    /// Length of the looping middle of the eat animation.
 +    [[nodiscard]] u16 eatFrames() const {
 +        return m_eatFrames;
++    }
++
++    /// @brief Retail +0x148. Presentation only: the walk clip's rate is 0.3 times it (calcRoam
++    /// 0x806BDA70; src/race_audio_frame.cpp).
++    [[nodiscard]] f32 railSpeed() const {
++        return m_railSpeed;
 +    }
 +
  private:
@@ -2118,7 +2124,7 @@ index d447748..f025476 100644
  
      void calcErupted();
 diff --git a/source/game/field/obj/ObjectHanachan.cc b/source/game/field/obj/ObjectHanachan.cc
-index 15870f0..600c924 100644
+index 15870f0..7356be4 100644
 --- a/source/game/field/obj/ObjectHanachan.cc
 +++ b/source/game/field/obj/ObjectHanachan.cc
 @@ -1,9 +1,22 @@
@@ -2268,7 +2274,7 @@ index 15870f0..600c924 100644
 +        m_landingFrame = static_cast<u32>(m_hopFrame);
 +
 +        // Retail also skips this while the part is culled on every screen, and plays the
-+        // rk_hanaSmk dust at skl_root (not ported).
++        // rk_hanaSmk dust at skl_root (src/course_effects.cpp).
 +        if (!skipsLandingEffect()) {
 +            cueSound(0x26c, SoundCall::StartNew); // SE_CC_HANACHAN_WALK_SHAKE
 +        }
@@ -2411,10 +2417,10 @@ index 15870f0..600c924 100644
 +
  } // namespace Kinoko::Field
 diff --git a/source/game/field/obj/ObjectHanachan.hh b/source/game/field/obj/ObjectHanachan.hh
-index fc9ac57..9775f5b 100644
+index fc9ac57..85d9574 100644
 --- a/source/game/field/obj/ObjectHanachan.hh
 +++ b/source/game/field/obj/ObjectHanachan.hh
-@@ -89,7 +89,43 @@ public:
+@@ -89,7 +89,49 @@ public:
      /// @addr{0x806CCACC}
      void loadRail() override {}
  
@@ -2432,6 +2438,12 @@ index fc9ac57..9775f5b 100644
 +    /// is drawn at pos + this (vtable +0x6c, 0x806CCA14); the collision ignores it.
 +    [[nodiscard]] const EGG::Vector3f &hitOffset() const {
 +        return m_hitOffset;
++    }
++
++    /// @brief Retail +0xd0, set from the hop's first landing to its end. Presentation only: the
++    /// body segments' landing dust (src/course_effects.cpp).
++    [[nodiscard]] bool landed() const {
++        return m_landed;
 +    }
 +
 +protected:
@@ -2458,7 +2470,7 @@ index fc9ac57..9775f5b 100644
      /// @addr{0x806CA5E4}
      void calcTransformFromUpAndTangent(const EGG::Vector3f &pos, const EGG::Vector3f &up,
              const EGG::Vector3f &tangent) {
-@@ -113,6 +149,12 @@ public:
+@@ -113,6 +155,12 @@ public:
  
      void calcCollisionTransform() override;
  
@@ -2471,7 +2483,7 @@ index fc9ac57..9775f5b 100644
  private:
      EGG::Vector3f m_lastPos;
  };
-@@ -159,6 +201,8 @@ public:
+@@ -159,6 +207,8 @@ public:
          calcRail();
          StateManager::calc();
          calcBody();
@@ -2480,7 +2492,7 @@ index fc9ac57..9775f5b 100644
      }
  
      /// @addr{0x806CC9FC}
-@@ -172,6 +216,15 @@ public:
+@@ -172,6 +222,15 @@ public:
      /// @addr{0x806CC9F4}
      void createCollision() override {}
  
@@ -2496,7 +2508,7 @@ index fc9ac57..9775f5b 100644
  private:
      enum class RailAlignment {
          Aligned = -1,
-@@ -195,6 +248,8 @@ private:
+@@ -195,6 +254,8 @@ private:
      void initChain();
      void clearChain();
      void calcRailAlignmentMotion();
@@ -2505,7 +2517,7 @@ index fc9ac57..9775f5b 100644
  
      /// @addr{0x806CAC74}
      void calcSlowMotion() {
-@@ -245,6 +300,9 @@ private:
+@@ -245,6 +306,9 @@ private:
      EGG::Vector3f m_right;
      RailAlignment m_railAlignment; ///< Captures when the wiggle takes sharp turns
      RailAlignment m_prevRailAlignment;
@@ -3795,7 +3807,7 @@ index d4cf398..a28ac25 100644
  
      } else {
 diff --git a/source/game/field/obj/ObjectPoihana.cc b/source/game/field/obj/ObjectPoihana.cc
-index 330e0af..8685f6e 100644
+index 330e0af..e765ce3 100644
 --- a/source/game/field/obj/ObjectPoihana.cc
 +++ b/source/game/field/obj/ObjectPoihana.cc
 @@ -1,6 +1,12 @@
@@ -3844,12 +3856,12 @@ index 330e0af..8685f6e 100644
      }
  }
  
-@@ -174,4 +192,294 @@ void ObjectPoihana::calcUp() {
+@@ -174,4 +192,291 @@ void ObjectPoihana::calcUp() {
      m_up = up;
  }
  
-+// These clocks belong to simulation. The renderer samples them without
-+// changing state, so animation sounds survive culling and stereo rendering.
++// These clocks belong to simulation. The renderer and the BRASD animation sounds
++// (src/race_audio_frame.cpp) sample them without changing state.
 +void ObjectPoihana::playAnimation(const char *name, f32 rate) {
 +    m_animationName = name;
 +    m_animationFrame = 0.0f;
@@ -3868,9 +3880,6 @@ index 330e0af..8685f6e 100644
 +    }
 +    ObjectPoihanaBase::calc();
 +    m_animationFrame += m_animationRate;
-+    const bool loop = !std::strcmp(m_animationName, "walk");
-+    m_animationSound.update(*this, "poihana", m_animationName, m_animationFrame,
-+            loop ? mkw::ObjectAnimationSound::frames("poihana", "walk") : 0.0f);
 +}
 +
 +// USA807394ac: normal hits request a throw; Star/Mega hits request a topple.
@@ -4140,18 +4149,10 @@ index 330e0af..8685f6e 100644
 +
  } // namespace Kinoko::Field
 diff --git a/source/game/field/obj/ObjectPoihana.hh b/source/game/field/obj/ObjectPoihana.hh
-index 0010514..ba63d6d 100644
+index 0010514..fee8e51 100644
 --- a/source/game/field/obj/ObjectPoihana.hh
 +++ b/source/game/field/obj/ObjectPoihana.hh
-@@ -2,6 +2,7 @@
- 
- #include "game/field/StateManager.hh"
- #include "game/field/obj/ObjectCollidable.hh"
-+#include <mkw/object_animation_sound.hpp>
- 
- namespace Kinoko::Field {
- 
-@@ -53,27 +54,51 @@ public:
+@@ -53,27 +53,50 @@ public:
      void init() override;
  
      /// @addr{0x80748B70}
@@ -4184,7 +4185,6 @@ index 0010514..ba63d6d 100644
 -        calcOrthonormalBasis();
 -        setTransform(m_workMat);
 -    }
-+    mkw::ObjectAnimationSound m_animationSound;
 +    const char *m_animationName = "walk";
 +    f32 m_animationFrame = 0.0f, m_animationRate = 1.0f;
 +    EGG::Vector3f m_hitDirection, m_hitPosition, m_throwPosition;
@@ -4222,7 +4222,7 @@ index 0010514..ba63d6d 100644
  
      /// @addr{0x80747308}
      [[nodiscard]] EGG::Vector3f curPos() const {
-@@ -108,22 +133,14 @@ private:
+@@ -108,22 +131,14 @@ private:
      }
  
      static constexpr std::array<StateManagerEntry, 8> STATE_ENTRIES = {{
@@ -7851,7 +7851,7 @@ index 3f8a267..f708ee9 100644
      f32 leanRotMin = -m_leanRotCap;
      f32 leanRotMax = m_leanRotCap;
 diff --git a/source/game/kart/KartMove.hh b/source/game/kart/KartMove.hh
-index 9845504..fa7c27c 100644
+index 9845504..97269fd 100644
 --- a/source/game/kart/KartMove.hh
 +++ b/source/game/kart/KartMove.hh
 @@ -1,6 +1,7 @@
@@ -7976,7 +7976,7 @@ index 9845504..fa7c27c 100644
      }
  
      /// @addr{0x80581720}
-@@ -224,6 +301,123 @@ public:
+@@ -224,6 +301,127 @@ public:
      }
      /// @endSetters
  
@@ -7986,6 +7986,10 @@ index 9845504..fa7c27c 100644
 +    /// @brief Read only, for presentation (KartEffect's SSMT sparks, src/main.cpp).
 +    bool ssmtLeeway() const { return m_flags.onBit(eFlags::SsmtLeeway); }
 +    s16 ssmtCharge() const { return m_ssmtCharge; }
++    /// @brief Read only, for presentation (KartEffect +0x44's reverse counter, 0x80694BC8).
++    bool waitingForBackwards() const {
++        return m_drivingDirection == DrivingDirection::WaitingForBackwards;
++    }
 +    // Presentation-only equivalent of the StartUpEffects duration callback.
 +    u32 startEffectSerial() const { return m_startEffectSerial; }
 +    s16 startEffectDuration() const { return m_startEffectDuration; }
@@ -8100,7 +8104,7 @@ index 9845504..fa7c27c 100644
      /// @beginGetters
      [[nodiscard]] DriftState driftState() const {
          return m_driftState;
-@@ -292,6 +486,10 @@ public:
+@@ -292,6 +490,10 @@ public:
          return m_lastDir;
      }
  
@@ -8111,7 +8115,7 @@ index 9845504..fa7c27c 100644
      [[nodiscard]] const EGG::Vector3f &vel1Dir() const {
          return m_vel1Dir;
      }
-@@ -300,6 +498,17 @@ public:
+@@ -300,6 +502,17 @@ public:
          return m_smoothedForward;
      }
  
@@ -8129,7 +8133,7 @@ index 9845504..fa7c27c 100644
      [[nodiscard]] f32 speedRatioCapped() const {
          return m_speedRatioCapped;
      }
-@@ -328,6 +537,12 @@ public:
+@@ -328,6 +541,12 @@ public:
          return m_respawnPostLandTimer;
      }
  
@@ -8142,7 +8146,7 @@ index 9845504..fa7c27c 100644
      [[nodiscard]] PadType &padType() {
          return m_padType;
      }
-@@ -354,6 +569,7 @@ protected:
+@@ -354,6 +573,7 @@ protected:
          Respawned = 0,   ///< Set when Lakitu lets go of the player, cleared when landing.
          DriftReset = 1,  ///< Set when a wall bonk should cancel your drift.
          SsmtCharged = 2, ///< Set after holding a stand-still mini-turbo for 75 frames.
@@ -8150,7 +8154,7 @@ index 9845504..fa7c27c 100644
          LaunchBoost = 4,
          SsmtLeeway = 5,       ///< If set, activates SSMT when not pressing A or B.
          TrickableSurface = 6, ///< Set when driving on a trickable surface.
-@@ -383,12 +599,26 @@ protected:
+@@ -383,12 +603,26 @@ protected:
          f32 boostRotFactor;
      };
  
@@ -8178,7 +8182,7 @@ index 9845504..fa7c27c 100644
      f32 m_acceleration;   ///< Captures the acceleration from player input and boosts.
      f32 m_speedDragMultiplier;  ///< After 5 frames of airtime, this causes speed to slowly decay.
      EGG::Vector3f m_smoothedUp; ///< A smoothed up vector, mostly used after significant airtime.
-@@ -459,17 +689,26 @@ protected:
+@@ -459,17 +693,26 @@ protected:
      s16 m_respawnPreLandTimer;  ///< Counts down from 4 when pressing A before landing from respawn.
      s16 m_respawnPostLandTimer; ///< Counts up to 4 if not accelerating after respawn landing.
      s16 m_respawnTimer;

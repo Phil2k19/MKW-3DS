@@ -87,6 +87,53 @@ def t3x_bytes(path):
  with open(path,'rb') as f:count=struct.unpack('<H',f.read(2))[0]
  return Path(path).stat().st_size-(9+12*count)
 
+# GMDL MAN1 track kinds: course and sky material animation (tools/export_brres.ts
+# animation.json; retail Field::CourseModel plays every SRT0/PAT0/CLR0 clip).
+MAN_SRT,MAN_PAT,MAN_CLR=1,2,3
+# MAN1 CLR track flags: the per-frame words that apply.
+MAN_CONSTANT,MAN_TINT,MAN_ADD=1,2,8
+def material_tracks(shape,animation,flags,alpha_factor,vertex_alpha,alpha_mix,limitations):
+ """One shape's MAN1 tracks {kind: (flags, frames, loop, step, records, payload)}
+ and the vertex alpha factor to bake. An animated alpha (a CLR0 register in the
+ GX alpha equation) bakes its peak and scales down per frame through the tint."""
+ tracks={}
+ srt=animation.get('srt')
+ if srt:
+  tracks[MAN_SRT]=(0,srt['frames'],srt['loop'],srt['step'],len(srt['data'])//12,struct.pack(f"<{len(srt['data'])}f",*srt['data']))
+ pat=animation.get('pat')
+ if pat:
+  payload=struct.pack(f"<{len(pat['data'])}h",*pat['data'])
+  tracks[MAN_PAT]=(0,pat['frames'],pat['loop'],1,pat['frames'],payload+bytes(-len(payload)%4))
+ clr=animation.get('clr')
+ if clr:
+  frames=clr['frames'];alpha=[1.]*frames;mixes=[alpha_mix]*frames;word=0
+  if clr.get('alpha'):
+   factors=[]
+   for f,registers in enumerate(clr['alpha']):
+    source={**shape['sourceMaterial'],'colorRegisters':registers['colorRegisters'],'colorConstants':registers['colorConstants']}
+    frame_flags,factor,frame_vertex,_,mixes[f],_=material_state({**shape,'sourceMaterial':source})
+    # A zero weight drops its factors from the GX alpha polynomial: still alpha 0.
+    if factor and (frame_flags,frame_vertex)!=(flags,vertex_alpha):
+     limitations.append('CLR0 '+clr['clip']+': alpha equation of '+shape['material']+' changes form');factors=None;break
+    factors.append(factor)
+   if factors and any(abs(x-alpha_factor)>1e-6 for x in factors):
+    alpha_factor=max(factors);alpha=[x/alpha_factor if alpha_factor else 0. for x in factors];word|=MAN_TINT
+  tint=clr.get('tint') or [[1.,1.,1.]]*frames
+  if clr.get('tint'):word|=MAN_TINT
+  constants=clr.get('constant') or [0]*frames
+  if clr.get('constant'):
+   word|=MAN_CONSTANT
+   # The same alpha-mix byte as the static constant (the alpha equation's lerp weight).
+   constants=[c if m is None else (c&0xffffff)|(m<<24) for c,m in zip(constants,mixes)]
+  elif any(m!=alpha_mix for m in mixes):
+   limitations.append('CLR0 '+clr['clip']+': alpha mix of '+shape['material']+' is not animated')
+  adds=clr.get('add') or [0]*frames
+  if clr.get('add'):word|=MAN_ADD
+  if word:
+   rgba=lambda t,a:sum(round(max(0.,min(1.,v))*255)<<(8*i) for i,v in enumerate([*t,a]))
+   tracks[MAN_CLR]=(word,frames,clr['loop'],1,frames,b''.join(struct.pack('<3I',c,rgba(t,a),d) for c,t,a,d in zip(constants,tint,alpha,adds)))
+ return tracks,alpha_factor
+
 # exact_formats: the PICA format that holds each GX source format's texels
 # unchanged (GX I/IA sample as (I,I,I,A), as PICA L/LA do).
 EXACT_FORMATS={ImageFormat.I4:'la4',ImageFormat.IA4:'la4',ImageFormat.I8:'la8',ImageFormat.IA8:'la8',ImageFormat.RGB565:'rgb565'}
@@ -101,10 +148,14 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
  # with mips, and writes GMDL v6 with each submesh's sampler state; brres are
  # the source archives (tex0_levels).
  data=json.loads((source/'model.json').read_text());(out/'textures').mkdir(parents=True,exist_ok=True);(out/'models').mkdir(parents=True,exist_ok=True)
+ # Course and sky material animation tracks by "model/shape" index (MAN1).
+ animation=json.loads((source/'animation.json').read_text()) if (source/'animation.json').is_file() else {'shapes':{},'mipTextures':[],'limitations':[]}
+ data['limitations']+=animation['limitations']
  names=[];audits=[]
  if texel_budget:
   authored=tex0_levels(brres)
-  mipmapped={s['name'] for m in json.loads((source/'materials.json').read_text()) for material in m['materials'] for s in material['samplers'] if s['minFilter']>=2}
+  # PAT0 frames swap in for a mip-filtered sampler's texture: mipped alike.
+  mipmapped={s['name'] for m in json.loads((source/'materials.json').read_text()) for material in m['materials'] for s in material['samplers'] if s['minFilter']>=2}|set(animation['mipTextures'])
   shadows={shape['secondary'] for model in data['models'] for shape in model['shapes'] if shape['lightingMode']==1 and shape['secondary']>=0}
  for index,t in enumerate(data['textures']):
   raw=(source/(t['file']+'.bin')).read_bytes();palpath=source/(t['file']+'.pal');pal=palpath.read_bytes() if palpath.exists() else b''
@@ -139,6 +190,8 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
  fallbacks={l.split(': ',1)[1] for l in data['limitations'] if l.startswith('Fallback material: ')}
  # Partition by unique vertices and preserve every triangle. Flush only at triangle boundaries.
  parts=[];vertices=[];indices=[];subs=[];lookup={};shapes=[]
+ # Per submesh: its MAN1 tracks and the animated material they belong to.
+ sub_tracks=[];sub_keys=[]
  # GMDL v4 adds the retail course lighting word, ambient register and albedo add per submesh.
  version=5 if any(shape.get('reflection') for model in data['models'] for shape in model['shapes']) else 4 if any(shape.get('retail') for model in data['models'] for shape in model['shapes']) else 3
  # GMDL v6 (texel_budget cooks) appends the GX sampler state of texture units 0
@@ -155,7 +208,7 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
   s=samplers[map_index] if 0<=map_index<len(samplers) and samplers[map_index]['name']==name else next((s for s in samplers if s['name']==name),None)
   return (s['minFilter']+1)|(max(-128,min(127,round(s['lodBias']*32)))&255)<<8 if s else 0
  def flush():
-  nonlocal vertices,indices,subs,lookup
+  nonlocal vertices,indices,subs,lookup,sub_tracks,sub_keys
   if not indices:return
   name=f'{prefix}_{len(parts):03d}';path=out/'models'/f'{name}.gmdl'
   with path.open('wb') as f:
@@ -164,11 +217,27 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
    for n in names:f.write(n.encode().ljust(64,b'\0'))
    for v in vertices:f.write(v)
    f.write(struct.pack('<'+'H'*len(indices),*indices))
-  parts.append({'name':name,'vertices':len(vertices),'triangles':len(indices)//3,'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()});vertices=[];indices=[];subs=[];lookup={}
- for model in data['models']:
-  for shape in model['shapes']:
+   # Optional trailing block (src/renderer.cpp Model::load): 'MAN1', the track
+   # count, then per track (submesh, kind | flags<<8, frames, loop, step, records)
+   # and its records: SRT 12 floats (both units' a b tx / c d ty) every `step`
+   # frames and the last; PAT int16 primary/secondary texture (-1 keeps) per
+   # frame; CLR u32 constant, tint RGBA8 and added colour per frame.
+   active=[(i,t) for i,t in enumerate(sub_tracks) if t]
+   block=b''.join(struct.pack('<6I',i,kind|word<<8,frames,loop,step,records)+payload for i,t in active for kind,(word,frames,loop,step,records,payload) in sorted(t.items()))
+   if active:f.write(struct.pack('<4sI',b'MAN1',sum(len(t) for _,t in active))+block)
+  parts.append({'name':name,'vertices':len(vertices),'triangles':len(indices)//3,'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+                **({'animationTracks':sum(len(t) for _,t in active),'animationBytes':8+len(block)} if active else {})})
+  vertices=[];indices=[];subs=[];lookup={};sub_tracks=[];sub_keys=[]
+ for model_index,model in enumerate(data['models']):
+  for shape_index,shape in enumerate(model['shapes']):
    shapes.append({k:v for k,v in shape.items() if k!='vertices'})
    flags,alpha_factor,vertex_alpha,alpha_limit,alpha_mix,extended=material_state(shape)
+   tracks=None
+   if f'{model_index}/{shape_index}' in animation['shapes']:
+    tracks,alpha_factor=material_tracks(shape,animation['shapes'][f'{model_index}/{shape_index}'],flags,alpha_factor,vertex_alpha,alpha_mix,data['limitations'])
+    shapes[-1]['animation']={('srt','pat','clr')[kind-1]:{'frames':t[1],'loop':t[2],'step':t[3],'bytes':24+len(t[5]),**({'flags':t[0]} if t[0] else {})} for kind,t in tracks.items()}
+   # A submesh never mixes an animated material with another one.
+   track_key=shape['material'] if tracks else None
    fixed_menu_alpha=bool((shape.get('retail') or {}).get('word',0)&(1<<21) and (flags>>20)&7==4)
    # Bit 29 is an unused alpha-reference selector whenever alpha test is off.
    # Reuse it for a restrained aqua grade on water whose TEV equation has no
@@ -212,15 +281,24 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
       raise ValueError('Projected glow conflicts with another material equation')
      # GX sea: P*(1+T1) + Z*(1-T1) after the stage-0 colour lerp P (Z: reflection constant).
      extended |= 3<<16
+    # GMDL v6 material program and EnvCamera unit 1 (tools/export_brres.ts): stage 1/2
+    # constants and the EnvCamera SRT in the reflection fields of a submesh without one.
+    # projection: a camera-projected unit 0 (program 6), its texture SRT likewise.
+    program=shape.get('program') or 0;environment=shape.get('environment');projection=shape.get('projection')
+    if (program or environment or projection) and (version<6 or shape.get('reflection') or glow or (environment and projection) or
+        (program and (shape['lightingMode'] or flags&(1<<25) or shape.get('textureAlphaAdd') or shape.get('skyScreenBlend')))):
+     raise ValueError('Material program conflicts with another material equation: '+shape['material'])
     material=[tex,flags,shape['secondary'],constant,*shape['uvVelocity'],shape['animationFrames']|extended]
     if version>=4:material+=retail_lighting(shape)
     if version>=5:
      reflection=shape.get('reflection')
-     material+=([reflection['mode'],reflection['constant'],reflection['add'],*reflection['uv']] if reflection else [0,glow['constant'],0,*glow['uv']] if glow else [0]*9)
+     material+=([reflection['mode'],reflection['constant'],reflection['add'],*reflection['uv']] if reflection else [0,glow['constant'],0,*glow['uv']] if glow else
+                [0,*(shape.get('programConstants') or [0,0]),*((environment or projection)['uv'] if environment or projection else [0]*6)] if program or environment else [0]*9)
     if version==6:
      samplers=(shape.get('sourceMaterial') or {}).get('samplers',[])
-     material.append(sampler(tex,shape['primaryMap'],samplers)|(8 if glow else 0)|sampler(shape['secondary'],shape['secondaryMap'],samplers)<<16)
-    if not subs or subs[-1][2:]!=material or (preserve_vertices and start==0):subs.append([len(indices),0,*material])
+     material.append(sampler(tex,shape['primaryMap'],samplers)|(8 if glow or projection else 0)|program<<4|(sampler(shape['secondary'],shape['secondaryMap'],samplers)|(8 if environment else 0))<<16)
+    if not subs or subs[-1][2:]!=material or sub_keys[-1]!=track_key or (preserve_vertices and start==0):
+     subs.append([len(indices),0,*material]);sub_tracks.append(tracks);sub_keys.append(track_key)
     for v in tri:
      if preserve_vertices:indices.append(len(vertices));vertices.append(v)
      else:
@@ -231,7 +309,7 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
  (out/'models'/f'{prefix}.list').write_text(''.join(p['name']+'\n' for p in parts))
  receipt={'source':str(source),'parts':parts,'textures':audits,'materials':shapes,'lighting':data.get('lighting'),'limitations':data['limitations']}
  (out/'models'/f'{prefix}-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
- print(json.dumps({'prefix':prefix,'parts':len(parts),'triangles':sum(p['triangles'] for p in parts),'geometry_bytes':sum(p['bytes'] for p in parts),**({'texture_bytes':sum(a.get('bytes',0) for a in audits)} if texel_budget else {})}))
+ print(json.dumps({'prefix':prefix,'parts':len(parts),'triangles':sum(p['triangles'] for p in parts),'geometry_bytes':sum(p['bytes'] for p in parts),**({'animation_bytes':sum(p.get('animationBytes',0) for p in parts)} if any('animationBytes' in p for p in parts) else {}),**({'texture_bytes':sum(a.get('bytes',0) for a in audits)} if texel_budget else {})}))
  return parts
 if __name__=='__main__':
  p=argparse.ArgumentParser();p.add_argument('source',type=Path);p.add_argument('output',type=Path);p.add_argument('--prefix',required=True);p.add_argument('--max-texture',type=int,default=256);a=p.parse_args();cook(a.source,a.output,a.prefix,a.max_texture)

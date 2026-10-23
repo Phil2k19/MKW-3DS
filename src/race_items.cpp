@@ -381,6 +381,9 @@ void RaceItems::useLightning(unsigned player){
         shrink(i,lightningShrinkDuration(rank(i),count_),false,false);
         sound(ItemSoundCue::Struck,i);
     }
+    // PAL activateLightning 0x807B7C20, after the racers: the global item hit with object
+    // type 6 (fn_1_31AEE0 0x8082B294), so the course objects react too (Goombas squash).
+    karts_->globalObjectHit(6);
     sound(ItemSoundCue::Lightning,player);
     itemSpawnTimers_[0]=1800; // ItemSlotData_resetLightningTimer
     // Every local screen flashes (0x8054a558 per screen), the user's included.
@@ -511,7 +514,11 @@ void RaceItems::updatePow(){
         --powTimer_;
         if(powTimer_==PowStompTimers[0])powStomp(1);
         else if(powTimer_==PowStompTimers[1])powStomp(2);
-        else if(powTimer_==PowStompTimers[2])powStomp(3);
+        else if(powTimer_==PowStompTimers[2]){
+            // PAL fn_1_2A1F44 0x807B22F8: the third stomp, then the global item hit with
+            // object type 11 (fn_1_31AEE0 0x8082B294).
+            powStomp(3);karts_->globalObjectHit(11);
+        }
     }
     // The block shows on the screens of the user and its targets (PowScreen, 0x807d9940).
     for(unsigned i=0;i<count_;++i)hud_[i].pow=uint16_t(powTimer_>0&&(i==powUser_||powTargets_[i])?powTimer_:0);

@@ -55,11 +55,22 @@ int handlerAction(const ItemActor& a,const ItemRacer& r){
     default:return -1;
     }
 }
+/// fn_1_289C08's matrix (fn_1_2CCD4C 0x807DD100) for a course drop launched at `velocity`:
+/// Z = -(the launch, normalised), or -X when its XZ length squared is under 1e-4 (0x808A51C8;
+/// the -1 is 0x808A51CC); X = (0,1,0) x Z, Y = Z x X.
+void launchFrame(ItemActor& a,Vec3 velocity){
+    const Vec3 z=velocity.x*velocity.x+velocity.z*velocity.z>=1e-4f?-normalized(velocity):Vec3{-1,0,0};
+    a.up=cross(z,normalized(cross(Vec3{0,1,0},z)));a.yaw=std::atan2(z.x,z.z);
+}
 }
 
 void RaceItems::courseMushroom(Vec3 position,Vec3 velocity,unsigned owner){
     // fn_1_289C08 (PAL 0x80799FBC, item kind 3): no Mushroom for owner 12 (an item no racer owns).
-    if(owner>=count_)return;
+    // ItemHolder_spawnDirect (0x8079A12C): nothing while the type's holder is full (capacity
+    // +0xc); it never evicts a live object, so neither does a full actor pool here.
+    const unsigned type=ItemObjects[unsigned(ItemKind::Mushroom)].type;
+    if(owner>=count_||objectCount(type)>=itemObjectCapacity(type))return;
+    if(std::none_of(actors_.begin(),actors_.end(),[](const ItemActor& x){return !x.active;}))return;
     auto& a=spawn(owner,ItemKind::Mushroom,false,&position);
     a.owner=int8_t(owner);
     // ItemHolder_spawnDirect (0x8079A12C) sets scale 0.7 and runs fn_1_296BC0 (0x807A6F74):
@@ -69,6 +80,7 @@ void RaceItems::courseMushroom(Vec3 position,Vec3 velocity,unsigned owner){
     a.position=a.previous=position;a.velocity=velocity+Vec3{0,groundItem(a.kind,timeTrial_)?25.f:35.f,0};a.scattered=true;a.guidance={};a.target=-1;
     a.scale=.7f;a.radius=itemProperties(unsigned(a.kind)).releasedContact*a.scale;a.terrainRadius=itemProperties(unsigned(a.kind)).terrain*a.scale;
     a.lifetime=1800;a.ownerImmunity=7;
+    launchFrame(a,velocity); // not the hitter's frame that spawn() gave it
 }
 void RaceItems::courseDrop(unsigned slot,Vec3 position,Vec3 velocity,unsigned owner,uint32_t randomWord){
     // ItemSlotData::decideItem (PAL 0x807BB42C, called as decideItem(slot, 1, 1, 1, 0)): the
@@ -99,11 +111,10 @@ void RaceItems::courseDrop(unsigned slot,Vec3 position,Vec3 velocity,unsigned ow
     if(it==actors_.end())it=std::find_if(actors_.begin(),actors_.end(),[](const ItemActor& a){return !a.active;});
     if(it==actors_.end())return;
     // As courseMushroom: scale 0.7, the scatter state with a pop up of 25 (35 for an item that
-    // is no ground item, or in time trials), the hitter spared 7 frames. Its matrix faces the
-    // launch velocity.
+    // is no ground item, or in time trials), the hitter spared 7 frames, the launch frame.
     auto& a=*it;a={};a.kind=kind;a.owner=int8_t(owner);a.active=true;
     a.position=a.previous=position;a.velocity=velocity+Vec3{0,groundItem(kind,timeTrial_)?25.f:35.f,0};a.scattered=true;
-    a.yaw=std::atan2(velocity.x,velocity.z);
+    launchFrame(a,velocity);
     a.scale=.7f;a.radius=itemProperties(unsigned(kind)).releasedContact*a.scale;a.terrainRadius=itemProperties(unsigned(kind)).terrain*a.scale;
     a.lifetime=1800;a.ownerImmunity=7;
 }
@@ -258,7 +269,11 @@ void RaceItems::objectContacts(ItemActor& a){
     const unsigned type=retailObjectId(a.kind);
     if(type>9)return;
     std::array<ItemObjectHit,8> hits;
-    const unsigned n=karts_->objectContacts(type,a.owner<0?12u:unsigned(a.owner),a.position,a.velocity,a.radius,false,hits.data(),unsigned(hits.size()));
+    // The object callbacks take owner 12 (none) for an item in the scatter state (+0x78 bit
+    // 0x8000, set by fn_1_296BC0 0x807A6F74 / fn_1_296E30 0x807A71E4): Goomba 0x806DBA98, crate
+    // 0x8077EA6C / 0x8077EB08. A dropped item that hits them gives no Mushroom or item.
+    const unsigned owner=a.owner<0||a.scattered?12u:unsigned(a.owner);
+    const unsigned n=karts_->objectContacts(type,owner,a.position,a.velocity,a.radius,false,hits.data(),unsigned(hits.size()));
     // fn_1_291B24 (0x807A1ED8): every touched object adds its push-out to the bounds that
     // move the item at the end; response 1 bounces it off (fn_1_291548 0x807A18FC) and
     // clears the young-owner flag 0x20000, response 2 destroys it with its break effect.
